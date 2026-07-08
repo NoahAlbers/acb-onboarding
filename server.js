@@ -3,12 +3,12 @@ const multer = require('multer');
 const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
-const { db, UPLOAD_DIR } = require('./db');
+const { db, UPLOAD_DIR, DATA_DIR } = require('./db');
 const { buildAgreementPdf, buildAllAgreementsPdf, resolvePayment } = require('./lib/agreement-pdf');
 const docuseal = require('./lib/docuseal');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || 'acb-admin-2026';
+const ADMIN_KEY = process.env.ADMIN_KEY || '!GreatCollectors123?';
 // FormSubmit endpoint used by the existing acb-form intake page; override via env.
 const FORMSUBMIT_ID = process.env.FORMSUBMIT_ID || 'dfeca48013a9d6519627f295dd99503c';
 const NOTIFY_ENABLED = process.env.NOTIFY_ENABLED !== 'false';
@@ -385,7 +385,13 @@ app.post('/api/sessions/:token/files', requireSession, (req, res) => {
 app.get('/api/sessions/:token/files/:id/download', requireSession, (req, res) => {
   const file = db.prepare('SELECT * FROM files WHERE id = ? AND session_id = ?').get(req.params.id, req.session.id);
   if (!file) return res.status(404).json({ error: 'File not found' });
-  res.download(path.join(UPLOAD_DIR, file.stored_name), file.original_name);
+  const full = path.join(UPLOAD_DIR, file.stored_name);
+  if (req.query.inline) {
+    res.setHeader('Content-Type', file.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${file.original_name.replace(/["\\]/g, '')}"`);
+    return res.sendFile(full);
+  }
+  res.download(full, file.original_name);
 });
 
 app.delete('/api/sessions/:token/files/:id', requireSession, (req, res) => {
@@ -435,12 +441,56 @@ app.get('/api/admin/sessions', requireAdmin, (req, res) => {
   res.json(sessions.map(serializeSession));
 });
 
-app.delete('/api/admin/sessions/:token', requireAdmin, (req, res) => {
-  const session = getSession(req.params.token);
-  if (!session) return res.status(404).json({ error: 'Onboarding not found' });
+// Storage overview: what the app is using, and how full the disk is.
+app.get('/api/admin/stats', requireAdmin, (req, res) => {
+  const walk = (dir) => {
+    let sum = 0;
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, d.name);
+      try { sum += d.isDirectory() ? walk(p) : fs.statSync(p).size; } catch (e) { /* file vanished mid-walk */ }
+    }
+    return sum;
+  };
+  let uploadsBytes = 0;
+  try { uploadsBytes = walk(UPLOAD_DIR); } catch (e) { /* no uploads yet */ }
+  let dbBytes = 0;
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { dbBytes += fs.statSync(path.join(DATA_DIR, 'onboarding.db' + suffix)).size; } catch (e) { /* absent */ }
+  }
+  let disk = null;
+  try {
+    const s = fs.statfsSync(DATA_DIR);
+    disk = { total: s.blocks * s.bsize, free: s.bavail * s.bsize };
+  } catch (e) { /* statfs unsupported */ }
+  res.json({
+    uploads_bytes: uploadsBytes,
+    db_bytes: dbBytes,
+    file_count: db.prepare('SELECT COUNT(*) AS c FROM files').get().c,
+    session_count: db.prepare('SELECT COUNT(*) AS c FROM sessions').get().c,
+    disk,
+  });
+});
+
+function deleteSessionRow(session) {
   const files = db.prepare('SELECT stored_name FROM files WHERE session_id = ?').all(session.id);
   db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id); // entities/files cascade
   for (const f of files) fs.promises.unlink(path.join(UPLOAD_DIR, f.stored_name)).catch(() => {});
+}
+
+app.post('/api/admin/sessions/bulk-delete', requireAdmin, (req, res) => {
+  const tokens = Array.isArray(req.body.tokens) ? req.body.tokens.slice(0, 500) : [];
+  let deleted = 0;
+  for (const t of tokens) {
+    const session = getSession(String(t));
+    if (session) { deleteSessionRow(session); deleted++; }
+  }
+  res.json({ deleted });
+});
+
+app.delete('/api/admin/sessions/:token', requireAdmin, (req, res) => {
+  const session = getSession(req.params.token);
+  if (!session) return res.status(404).json({ error: 'Onboarding not found' });
+  deleteSessionRow(session);
   res.json({ ok: true });
 });
 

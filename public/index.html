@@ -942,22 +942,86 @@
 
     /* ============ admin ============ */
 
+    const fmtBytes = (n) => {
+      if (n == null) return '—';
+      if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;
+      if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+      return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+    };
+
+    function StorageCard({stats}) {
+      if (!stats) return null;
+      const app = stats.uploads_bytes + stats.db_bytes;
+      const disk = stats.disk;
+      const usedPct = disk ? Math.round((disk.total - disk.free) / disk.total * 100) : null;
+      const barColor = usedPct == null ? T.blue : usedPct > 90 ? T.red : usedPct > 75 ? T.warn : T.green;
+      return (
+        <div style={{...card,padding:'16px 20px',display:'flex',gap:26,flexWrap:'wrap',alignItems:'center'}}>
+          <div>
+            <div style={{fontSize:12,color:T.textLight,fontWeight:700,textTransform:'uppercase',letterSpacing:0.4}}>Portal storage</div>
+            <div style={{fontSize:20,fontWeight:800,color:T.text}}>{fmtBytes(app)}</div>
+            <div style={{fontSize:12.5,color:T.textLight}}>{fmtBytes(stats.uploads_bytes)} in {stats.file_count} uploaded file{stats.file_count===1?'':'s'} · {fmtBytes(stats.db_bytes)} database</div>
+          </div>
+          {disk && (
+            <div style={{flex:'1 1 260px',minWidth:220}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:12.5,color:T.textMid,fontWeight:600,marginBottom:5}}>
+                <span>Server disk (VPS)</span>
+                <span style={{color:usedPct>90?T.red:usedPct>75?T.warn:T.textMid}}>{usedPct}% used · {fmtBytes(disk.free)} free of {fmtBytes(disk.total)}</span>
+              </div>
+              <div style={{height:9,background:T.blueLight,borderRadius:50,overflow:'hidden'}}>
+                <div style={{height:'100%',width:`${usedPct}%`,background:barColor,borderRadius:50,transition:'width .4s'}}/>
+              </div>
+              {usedPct > 75 && <div style={{fontSize:12,color:usedPct>90?T.red:T.warn,fontWeight:700,marginTop:5}}>{usedPct > 90 ? 'Disk almost full — clear old onboardings or grow the VPS disk.' : 'Keep an eye on this — consider clearing old onboardings.'}</div>}
+            </div>
+          )}
+        </div>
+      );
+    }
+
     function Admin() {
       const [key, setKey] = useState(localStorage.getItem('acb_admin_key') || '');
       const [sessions, setSessions] = useState(null);
+      const [stats, setStats] = useState(null);
       const [err, setErr] = useState('');
       const [q, setQ] = useState('');
+      const [status, setStatus] = useState('all');
       const [open, setOpen] = useState({});
+      const [selected, setSelected] = useState({});
+      const [busy, setBusy] = useState(false);
+      const searchRef = useRef(null);
 
       const load = async (k) => {
         if (!k) return setErr('Enter the admin key to sign in.');
         try {
-          const data = await api(`/api/admin/sessions?key=${encodeURIComponent(k)}`);
+          const [data, st] = await Promise.all([
+            api(`/api/admin/sessions?key=${encodeURIComponent(k)}`),
+            api(`/api/admin/stats?key=${encodeURIComponent(k)}`),
+          ]);
           localStorage.setItem('acb_admin_key', k);
-          setSessions(data); setErr('');
-        } catch (e) { setErr(e.message); setSessions(null); }
+          setSessions(data); setStats(st); setErr(''); setSelected({});
+        } catch (e) { setErr(e.message); setSessions(null); setStats(null); }
       };
       useEffect(() => { if (key) load(key); }, []);
+
+      const filtered = (sessions || []).filter(s => {
+        if (status === 'done' && !s.completed_at) return false;
+        if (status === 'progress' && s.completed_at) return false;
+        const hay = `${s.company_name} ${s.contact_name} ${s.contact_email} ${s.entities.map(e=>e.legal_name+' '+e.property_name).join(' ')}`.toLowerCase();
+        return hay.includes(q.trim().toLowerCase());
+      });
+      const completed = (sessions || []).filter(s => s.completed_at).length;
+      const pickedTokens = Object.keys(selected).filter(t => selected[t]);
+      const picked = (sessions || []).filter(s => selected[s.token]);
+      const allFilteredSelected = filtered.length > 0 && filtered.every(s => selected[s.token]);
+
+      const toggleAll = () => {
+        const next = {...selected};
+        filtered.forEach(s => { next[s.token] = !allFilteredSelected; });
+        setSelected(next);
+      };
+
+      const fmtWhen = (iso) => new Date(iso).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+      const sessionBytes = (s) => s.files.reduce((sum, f) => sum + (f.size || 0), 0);
 
       const del = async (s) => {
         const label = s.company_name || 'this onboarding';
@@ -965,20 +1029,51 @@
         try {
           await api(`/api/admin/sessions/${s.token}?key=${encodeURIComponent(key)}`, {method:'DELETE'});
           setSessions(list => list.filter(x => x.token !== s.token));
+          load(key);
         } catch (e) { alert(e.message); }
       };
 
-      const filtered = (sessions || []).filter(s => {
-        const hay = `${s.company_name} ${s.contact_name} ${s.contact_email} ${s.entities.map(e=>e.legal_name+' '+e.property_name).join(' ')}`.toLowerCase();
-        return hay.includes(q.trim().toLowerCase());
-      });
-      const completed = (sessions || []).filter(s => s.completed_at).length;
+      const bulkDelete = async () => {
+        const typed = window.prompt(`You are about to permanently delete ${pickedTokens.length} onboarding${pickedTokens.length===1?'':'s'}, including all agreements, uploaded files, and client links.\n\nType DELETE to confirm:`);
+        if (typed !== 'DELETE') return;
+        setBusy(true);
+        try {
+          const r = await api(`/api/admin/sessions/bulk-delete?key=${encodeURIComponent(key)}`, {method:'POST', body:{tokens: pickedTokens}});
+          await load(key);
+          alert(`Deleted ${r.deleted} onboarding${r.deleted===1?'':'s'}.`);
+        } catch (e) { alert(e.message); }
+        setBusy(false);
+      };
 
-      const fmtWhen = (iso) => new Date(iso).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+      const exportCsv = () => {
+        const rows = [['Company','Contact','Email','Phone','Type','Status','Entities','Signed/Total','Check details','Files','Storage','Client link','Started','Last activity']];
+        for (const s of picked.length ? picked : filtered) {
+          rows.push([
+            s.company_name, s.contact_name, s.contact_email, s.contact_phone,
+            s.mgmt_type === 'third_party' ? 'Third-Party' : s.mgmt_type === 'owner_operator' ? 'Owner Operator' : '',
+            s.completed_at ? 'Completed' : 'In progress',
+            s.entities.map(e => e.legal_name).join('; '),
+            `${s.progress.signed}/${s.progress.total}`,
+            s.entities.map(e => `${e.legal_name}: payable to ${e.resolved_payment.payableTo}${e.resolved_payment.address ? ', ' + e.resolved_payment.address : ''}`).join(' | '),
+            s.files.map(f => f.original_name).join('; '),
+            fmtBytes(sessionBytes(s)),
+            `${window.location.origin}/o/${s.token}`,
+            s.created_at, s.updated_at,
+          ]);
+        }
+        const csv = rows.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
+        a.download = `acb-onboardings-${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      };
+
+      const fileLabel = (f) => f.kind==='management_agreement' ? 'Management agreement' : f.kind==='lease' ? 'Lease' : 'File';
 
       return (
-        <div style={{maxWidth:980,margin:'0 auto',padding:'30px 18px 80px'}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12,marginBottom:8}}>
+        <div style={{maxWidth:1020,margin:'0 auto',padding:'30px 18px 120px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12,marginBottom:14}}>
             <Brand/>
             <div style={{display:'flex',gap:8}}>
               <input style={{...inputStyle,width:220}} type="password" placeholder="Admin key" value={key} onChange={e=>setKey(e.target.value)} onKeyDown={e=>e.key==='Enter'&&load(key)}/>
@@ -990,26 +1085,42 @@
 
           {sessions && (
             <div className="fade-in">
-              <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',margin:'12px 0 16px'}}>
-                <Chip tone="info">{sessions.length} total</Chip>
-                <Chip tone="done">{completed} completed</Chip>
-                <Chip tone="todo">{sessions.length - completed} in progress</Chip>
-                <input style={{...inputStyle,flex:'1 1 220px',maxWidth:340,marginLeft:'auto'}} placeholder="🔍 Search company, contact, or entity…" value={q} onChange={e=>setQ(e.target.value)}/>
+              <StorageCard stats={stats}/>
+
+              <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',margin:'4px 0 14px'}}>
+                <div style={{position:'relative',flex:'1 1 260px',maxWidth:420}}>
+                  <span style={{position:'absolute',left:13,top:'50%',transform:'translateY(-50%)',color:T.textLight,fontSize:14}}>🔍</span>
+                  <input ref={searchRef} style={{...inputStyle,paddingLeft:36,paddingRight:32}} placeholder="Search company, contact, or entity…" value={q} onChange={e=>setQ(e.target.value)}/>
+                  {q && <button onClick={()=>{setQ('');searchRef.current.focus();}} style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',border:'none',background:'transparent',color:T.textLight,cursor:'pointer',fontSize:15,fontWeight:700}}>✕</button>}
+                </div>
+                {[['all',`All (${sessions.length})`],['progress',`In progress (${sessions.length-completed})`],['done',`Completed (${completed})`]].map(([v,label])=>(
+                  <button key={v} onClick={()=>setStatus(v)} style={{...btnGhost,fontSize:13,padding:'8px 15px',background:status===v?T.blue:T.blueLight,color:status===v?'#fff':T.blue}}>{label}</button>
+                ))}
+                <label style={{display:'flex',alignItems:'center',gap:7,fontSize:13,fontWeight:600,color:T.textMid,cursor:'pointer',marginLeft:'auto'}}>
+                  <input type="checkbox" checked={allFilteredSelected} onChange={toggleAll} style={{width:16,height:16,accentColor:T.blue,cursor:'pointer'}}/>
+                  Select all shown
+                </label>
+                <button style={{...btnGhost,fontSize:13,padding:'8px 15px'}} onClick={exportCsv} title="Export the selected (or all shown) onboardings as a spreadsheet">⬇ CSV</button>
               </div>
-              {!filtered.length && <div style={{color:T.textLight,padding:'30px 0',textAlign:'center'}}>{sessions.length ? 'No onboardings match your search.' : 'No onboardings yet — share the landing page with a client to get started.'}</div>}
+
+              {!filtered.length && <div style={{color:T.textLight,padding:'30px 0',textAlign:'center'}}>{sessions.length ? 'No onboardings match.' : 'No onboardings yet — share the landing page with a client to get started.'}</div>}
 
               {filtered.map(s => {
                 const isOpen = !!open[s.token];
+                const isPicked = !!selected[s.token];
+                const bytes = sessionBytes(s);
                 return (
-                  <div key={s.token} style={{...card,padding:'16px 20px'}}>
-                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap',cursor:'pointer'}} onClick={()=>setOpen(o=>({...o,[s.token]:!isOpen}))}>
-                      <div style={{minWidth:0}}>
+                  <div key={s.token} style={{...card,padding:'16px 20px',border:isPicked?`2px solid ${T.blue}`:card.border ? card.border : `1px solid ${T.border}`,borderColor:isPicked?T.blue:T.border}}>
+                    <div style={{display:'flex',alignItems:'center',gap:12,flexWrap:'wrap'}}>
+                      <input type="checkbox" checked={isPicked} onChange={()=>setSelected(sel=>({...sel,[s.token]:!isPicked}))} style={{width:17,height:17,accentColor:T.blue,cursor:'pointer',flexShrink:0}}/>
+                      <div style={{minWidth:0,flex:1,cursor:'pointer'}} onClick={()=>setOpen(o=>({...o,[s.token]:!isOpen}))}>
                         <b style={{fontSize:16,color:T.text}}>{s.company_name || '(no company name)'}</b>
                         <div style={{fontSize:13,color:T.textLight}}>
-                          {s.contact_name || 'no contact'}{s.contact_email ? ` · ${s.contact_email}` : ''} · {s.mgmt_type==='third_party'?'Third-Party':s.mgmt_type==='owner_operator'?'Owner Operator':'type not set'} · updated {fmtWhen(s.updated_at)}
+                          {s.contact_name || 'no contact'}{s.contact_email ? ` · ${s.contact_email}` : ''} · {s.mgmt_type==='third_party'?'Third-Party':s.mgmt_type==='owner_operator'?'Owner Operator':'type not set'}
+                          {s.files.length ? ` · ${s.files.length} file${s.files.length===1?'':'s'} (${fmtBytes(bytes)})` : ''} · updated {fmtWhen(s.updated_at)}
                         </div>
                       </div>
-                      <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                      <div style={{display:'flex',gap:8,alignItems:'center',cursor:'pointer'}} onClick={()=>setOpen(o=>({...o,[s.token]:!isOpen}))}>
                         {s.completed_at ? <Chip tone="done">Complete ✓</Chip> : <Chip tone="todo">{s.progress.signed}/{s.progress.total} signed</Chip>}
                         <span style={{color:T.textLight,fontSize:13,fontWeight:700}}>{isOpen ? '▲' : '▼'}</span>
                       </div>
@@ -1026,18 +1137,28 @@
                             </span>
                             <span style={{display:'flex',gap:8,alignItems:'center',flexShrink:0}}>
                               {e.signed_at ? <span style={{color:T.green,fontWeight:700,fontSize:12.5}}>Signed {fmtWhen(e.signed_at)} by {e.signer_name}</span> : <span style={{color:T.warn,fontWeight:700,fontSize:12.5}}>Unsigned</span>}
-                              <a href={`/api/sessions/${s.token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{color:T.blue,fontWeight:600,fontSize:12.5,textDecoration:'none'}}>PDF</a>
+                              <a href={`/api/sessions/${s.token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{color:T.blue,fontWeight:600,fontSize:12.5,textDecoration:'none'}}>View</a>
+                              <a href={`/api/sessions/${s.token}/entities/${e.id}/agreement.pdf?download=1`} style={{color:T.blue,fontWeight:600,fontSize:12.5,textDecoration:'none'}}>⬇</a>
                             </span>
                           </div>
                         ))}
                         {!s.entities.length && <div style={{fontSize:13,color:T.textLight,padding:'6px 0'}}>No entities added yet.</div>}
+
                         {s.files.length > 0 && (
-                          <div style={{fontSize:13,color:T.textLight,marginTop:8}}>
-                            Files: {s.files.map(f=>(
-                              <a key={f.id} href={`/api/sessions/${s.token}/files/${f.id}/download`} style={{color:T.blue,marginRight:10}}>{f.kind==='management_agreement'?'Mgmt agreement':f.kind==='lease'?'Lease':'File'}: {f.original_name}</a>
+                          <div style={{marginTop:10}}>
+                            <div style={{fontSize:12,color:T.textLight,fontWeight:700,textTransform:'uppercase',letterSpacing:0.4,marginBottom:5}}>Uploaded documents</div>
+                            {s.files.map(f=>(
+                              <div key={f.id} style={{display:'flex',justifyContent:'space-between',gap:10,alignItems:'center',fontSize:13,color:T.textMid,padding:'5px 0',flexWrap:'wrap'}}>
+                                <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis'}}><b style={{color:T.text}}>{fileLabel(f)}</b> · {f.original_name} <span style={{color:T.textLight}}>({fmtBytes(f.size)})</span></span>
+                                <span style={{display:'flex',gap:10,flexShrink:0}}>
+                                  <a href={`/api/sessions/${s.token}/files/${f.id}/download?inline=1`} target="_blank" rel="noopener" style={{color:T.blue,fontWeight:600,fontSize:12.5,textDecoration:'none'}}>View</a>
+                                  <a href={`/api/sessions/${s.token}/files/${f.id}/download`} style={{color:T.blue,fontWeight:600,fontSize:12.5,textDecoration:'none'}}>Download</a>
+                                </span>
+                              </div>
                             ))}
                           </div>
                         )}
+
                         <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12,alignItems:'center'}}>
                           <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/o/${s.token}`} target="_blank" rel="noopener">Open portal (view/edit)</a>
                           {s.progress.total > 0 && <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/api/sessions/${s.token}/agreements.pdf`} target="_blank" rel="noopener">All PDFs</a>}
@@ -1050,6 +1171,15 @@
                   </div>
                 );
               })}
+
+              {pickedTokens.length > 0 && (
+                <div className="fade-in" style={{position:'fixed',bottom:18,left:'50%',transform:'translateX(-50%)',background:T.text,color:'#fff',borderRadius:50,padding:'10px 12px 10px 22px',display:'flex',gap:10,alignItems:'center',boxShadow:'0 10px 30px rgba(26,26,46,.35)',zIndex:80}}>
+                  <b style={{fontSize:14}}>{pickedTokens.length} selected</b>
+                  <button style={{...btnGhost,fontSize:13,padding:'8px 15px'}} onClick={exportCsv}>⬇ Export CSV</button>
+                  <button style={{...btnGhost,fontSize:13,padding:'8px 15px',background:'#3d2530',color:'#ff9c9c',opacity:busy?0.6:1}} disabled={busy} onClick={bulkDelete}>🗑 Delete</button>
+                  <button style={{border:'none',background:'transparent',color:'#9aa0b5',cursor:'pointer',fontSize:15,fontWeight:700,padding:'4px 8px'}} onClick={()=>setSelected({})} title="Clear selection">✕</button>
+                </div>
+              )}
             </div>
           )}
         </div>
