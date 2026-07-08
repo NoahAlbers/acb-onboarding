@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
 `);
 
-// Additive migrations for databases created before DocuSeal integration.
+// Additive migrations for databases created before these columns existed.
+try { db.exec("ALTER TABLE sessions ADD COLUMN contact_title TEXT NOT NULL DEFAULT ''"); } catch (e) { /* already exists */ }
 for (const col of [
   'docuseal_submission_id INTEGER',
   'docuseal_slug TEXT',
@@ -68,6 +69,7 @@ for (const col of [
   "contact_name TEXT NOT NULL DEFAULT ''",
   "contact_email TEXT NOT NULL DEFAULT ''",
   "contact_phone TEXT NOT NULL DEFAULT ''",
+  "contact_title TEXT NOT NULL DEFAULT ''",
 ]) {
   try { db.exec(`ALTER TABLE entities ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }

@@ -389,7 +389,7 @@
           </div>
           <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
             <Field label="Phone" style={{flex:'1 1 180px'}}><input style={inputStyle} value={session.contact_phone} onChange={e=>patchSession({contact_phone:e.target.value})}/></Field>
-            <Field label="Fax" hint="optional" style={{flex:'1 1 180px'}}><input style={inputStyle} value={session.contact_fax} onChange={e=>patchSession({contact_fax:e.target.value})}/></Field>
+            <Field label="Contact's title" hint="optional" style={{flex:'1 1 180px'}}><input style={inputStyle} value={session.contact_title||''} onChange={e=>patchSession({contact_title:e.target.value})} placeholder="e.g. Property Manager"/></Field>
           </div>
           <Field label="Which best describes you?" hint="if you do both, choose third-party">
             <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
@@ -452,6 +452,7 @@
                   <div style={{fontSize:12.5,fontWeight:700,color:T.textMid,marginBottom:8}}>Point of contact for this entity <span style={{fontWeight:400,color:T.textLight}}>— used on this agreement instead of the main contact</span></div>
                   <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
                     <Field label="Name" style={{flex:'1 1 150px',marginBottom:4}}><input style={inputStyle} value={e.contact_name} onChange={ev=>patchEntity(e.id,{contact_name:ev.target.value})} placeholder={session.contact_name || 'Full name'}/></Field>
+                    <Field label="Title" style={{flex:'1 1 120px',marginBottom:4}}><input style={inputStyle} value={e.contact_title||''} onChange={ev=>patchEntity(e.id,{contact_title:ev.target.value})} placeholder={session.contact_title || 'Title'}/></Field>
                     <Field label="Email" style={{flex:'1 1 170px',marginBottom:4}}><input style={inputStyle} value={e.contact_email} onChange={ev=>patchEntity(e.id,{contact_email:ev.target.value})} placeholder={session.contact_email || 'email@company.com'}/></Field>
                     <Field label="Phone" style={{flex:'1 1 130px',marginBottom:4}}><input style={inputStyle} value={e.contact_phone} onChange={ev=>patchEntity(e.id,{contact_phone:ev.target.value})} placeholder={session.contact_phone || '(321) 555-0100'}/></Field>
                   </div>

@@ -57,6 +57,7 @@ function serializeSession(session) {
     contact_email: session.contact_email,
     contact_phone: session.contact_phone,
     contact_fax: session.contact_fax,
+    contact_title: session.contact_title,
     mgmt_type: session.mgmt_type,
     checks_mode: session.checks_mode,
     corporate_payable_to: session.corporate_payable_to,
@@ -74,6 +75,7 @@ function serializeSession(session) {
       contact_name: e.contact_name,
       contact_email: e.contact_email,
       contact_phone: e.contact_phone,
+      contact_title: e.contact_title,
       signer_name: e.signer_name,
       signer_title: e.signer_title,
       signed_at: e.signed_at,
@@ -98,10 +100,10 @@ function touch(sessionId) {
 }
 
 const SESSION_FIELDS = [
-  'company_name', 'contact_name', 'contact_email', 'contact_phone', 'contact_fax',
+  'company_name', 'contact_name', 'contact_email', 'contact_phone', 'contact_fax', 'contact_title',
   'mgmt_type', 'checks_mode', 'corporate_payable_to', 'corporate_check_address',
 ];
-const ENTITY_FIELDS = ['legal_name', 'property_name', 'address', 'payable_to', 'check_address', 'contact_name', 'contact_email', 'contact_phone'];
+const ENTITY_FIELDS = ['legal_name', 'property_name', 'address', 'payable_to', 'check_address', 'contact_name', 'contact_email', 'contact_phone', 'contact_title'];
 
 function requireSession(req, res, next) {
   const session = getSession(req.params.token);
@@ -215,7 +217,7 @@ app.patch('/api/sessions/:token/entities/:id', requireSession, (req, res) => {
   }
   if (updates.length) {
     // Changing what the agreement says voids an existing signature — it must be re-signed.
-    const material = ['legal_name', 'address', 'contact_name', 'contact_email', 'contact_phone'].some(
+    const material = ['legal_name', 'address', 'contact_name', 'contact_email', 'contact_phone', 'contact_title'].some(
       (f) => f in req.body && String(req.body[f] ?? '').trim() !== entity[f]
     );
     if (material && (entity.signed_at || entity.docuseal_submission_id)) {
