@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Client Onboarding — Advanced Collection Bureau</title>
+  <!--
+    Libraries pinned to EXACT versions (same rationale as acb-form:
+    unpinned @babel/standalone silently pulled a breaking major once).
+    Do NOT change these to "latest" or an unpinned major version.
+  -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7.29.0/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Caveat:wght@600&display=swap" rel="stylesheet">
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{background:#F4F5F9;min-height:100vh;font-family:'Outfit',sans-serif;}
+    input,textarea,select,button{font-family:'Outfit',sans-serif;}
+    input:focus,textarea:focus{outline:none;border-color:#3D5AF1 !important;box-shadow:0 0 0 3px #D5DBFC;}
+    ::placeholder{color:#B4B7C4;}
+    @keyframes confetti-fall{0%{transform:translateY(0) rotate(0deg);opacity:1;}100%{transform:translateY(100vh) rotate(720deg);opacity:0;}}
+    @keyframes fade-in{0%{opacity:0;transform:translateY(6px);}100%{opacity:1;transform:translateY(0);}}
+    .fade-in{animation:fade-in .25s ease;}
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    const T = {blue:"#3D5AF1",blueDark:"#2D45C6",blueLight:"#EEF1FE",blueMid:"#D5DBFC",bg:"#F4F5F9",card:"#FFFFFF",text:"#1A1A2E",textMid:"#4A4A68",textLight:"#8889A0",border:"#E2E4EC",warn:"#E8A83E",warnBg:"#FEF9EE",green:"#16a34a",greenBg:"#EBFAF1",red:"#DC4C4C"};
+
+    /* ============ shared bits ============ */
+
+    const api = async (path, opts = {}) => {
+      const res = await fetch(path, {
+        headers: opts.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+        ...opts,
+        body: opts.body instanceof FormData ? opts.body : opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Something went wrong. Please try again.');
+      return data;
+    };
+
+    const card = {background:T.card,borderRadius:14,border:`1px solid ${T.border}`,padding:'26px 28px',marginBottom:18};
+    const inputStyle = {width:'100%',padding:'11px 14px',borderRadius:10,border:`1.5px solid ${T.border}`,fontSize:15,color:T.text,background:'#fff',transition:'border-color .15s'};
+    const labelStyle = {display:'block',fontSize:13,fontWeight:600,color:T.textMid,marginBottom:6};
+    const btnPrimary = {background:T.blue,color:'#fff',border:'none',borderRadius:50,padding:'12px 26px',fontSize:15,fontWeight:600,cursor:'pointer'};
+    const btnGhost = {background:T.blueLight,color:T.blue,border:'none',borderRadius:50,padding:'9px 18px',fontSize:14,fontWeight:600,cursor:'pointer'};
+    const btnDanger = {background:'transparent',color:T.textLight,border:'none',borderRadius:50,padding:'6px 10px',fontSize:13,fontWeight:600,cursor:'pointer'};
+
+    const Field = ({label, hint, children, style}) => (
+      <div style={{marginBottom:14,...style}}>
+        <label style={labelStyle}>{label}{hint && <span style={{fontWeight:400,color:T.textLight}}> — {hint}</span>}</label>
+        {children}
+      </div>
+    );
+
+    const Chip = ({tone, children}) => {
+      const tones = {
+        done:{bg:T.greenBg,fg:T.green}, todo:{bg:T.warnBg,fg:T.warn},
+        info:{bg:T.blueLight,fg:T.blue}, muted:{bg:'#F0F1F5',fg:T.textLight},
+      };
+      const c = tones[tone] || tones.muted;
+      return <span style={{background:c.bg,color:c.fg,borderRadius:50,padding:'4px 12px',fontSize:12.5,fontWeight:700,whiteSpace:'nowrap'}}>{children}</span>;
+    };
+
+    const SectionCard = ({num, title, subtitle, chip, children}) => (
+      <div style={card} className="fade-in">
+        <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:12,flexWrap:'wrap',marginBottom:6}}>
+          <div style={{display:'flex',gap:14,alignItems:'flex-start'}}>
+            <div style={{minWidth:32,height:32,borderRadius:50,background:T.blueLight,color:T.blue,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:15}}>{num}</div>
+            <div>
+              <div style={{fontSize:18,fontWeight:700,color:T.text}}>{title}</div>
+              {subtitle && <div style={{fontSize:14,color:T.textLight,marginTop:2,maxWidth:560}}>{subtitle}</div>}
+            </div>
+          </div>
+          {chip}
+        </div>
+        <div style={{marginLeft:0,marginTop:16}}>{children}</div>
+      </div>
+    );
+
+    const Toast = ({msg}) => !msg ? null : (
+      <div style={{position:'fixed',bottom:24,left:'50%',transform:'translateX(-50%)',background:T.text,color:'#fff',padding:'12px 22px',borderRadius:50,fontSize:14,fontWeight:600,zIndex:100,boxShadow:'0 8px 24px rgba(26,26,46,.25)'}} className="fade-in">{msg}</div>
+    );
+
+    const Confetti = () => (
+      <div style={{position:'fixed',inset:0,pointerEvents:'none',zIndex:99,overflow:'hidden'}}>
+        {Array.from({length:90}).map((_,i)=>(
+          <div key={i} style={{position:'absolute',top:-20,left:`${(i*37)%100}%`,width:8,height:i%3?8:14,background:['#3D5AF1','#4ECDC4','#FFD700','#FF6B6B','#A78BFA'][i%5],borderRadius:i%2?50:2,animation:`confetti-fall ${2.2+(i%10)/4}s linear ${(i%20)/10}s forwards`}}/>
+        ))}
+      </div>
+    );
+
+    /* ============ landing page ============ */
+
+    function Landing() {
+      const [form, setForm] = useState({company_name:'',contact_name:'',contact_email:'',contact_phone:'',mgmt_type:''});
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const set = (k) => (e) => setForm(f => ({...f, [k]: e.target.value}));
+
+      const start = async () => {
+        if (!form.company_name.trim()) return setErr('Please enter your company name.');
+        if (!form.contact_name.trim()) return setErr('Please enter your name.');
+        setErr(''); setBusy(true);
+        try {
+          const s = await api('/api/sessions', {method:'POST', body:form});
+          window.location.href = `/o/${s.token}`;
+        } catch (e) { setErr(e.message); setBusy(false); }
+      };
+
+      return (
+        <div style={{maxWidth:640,margin:'0 auto',padding:'48px 20px 80px'}}>
+          <Brand/>
+          <div style={{textAlign:'center',margin:'34px 0 30px'}}>
+            <h1 style={{fontSize:34,fontWeight:800,color:T.text,letterSpacing:-0.5}}>Client Onboarding</h1>
+            <p style={{fontSize:16.5,color:T.textMid,marginTop:10,lineHeight:1.55}}>
+              Set up collection services for all of your properties in one place.
+              You'll get a private link you can share with anyone on your team —
+              they can add entities, fill in payment details, upload documents, and sign.
+            </p>
+          </div>
+          <div style={{display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap',marginBottom:30}}>
+            {['Add your entities','Tell us where checks go','Attach your lease','Sign everything at once'].map((s,i)=>(
+              <span key={i} style={{background:'#fff',border:`1px solid ${T.border}`,borderRadius:50,padding:'7px 16px',fontSize:13.5,fontWeight:600,color:T.textMid}}>{i+1}. {s}</span>
+            ))}
+          </div>
+          <div style={{...card,padding:'30px 32px'}}>
+            <Field label="Management company name"><input style={inputStyle} value={form.company_name} onChange={set('company_name')} placeholder="e.g. Sunrise Property Management"/></Field>
+            <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+              <Field label="Your name" style={{flex:'1 1 200px'}}><input style={inputStyle} value={form.contact_name} onChange={set('contact_name')} placeholder="Full name"/></Field>
+              <Field label="Phone" style={{flex:'1 1 160px'}}><input style={inputStyle} value={form.contact_phone} onChange={set('contact_phone')} placeholder="(321) 555-0100"/></Field>
+            </div>
+            <Field label="Email"><input style={inputStyle} type="email" value={form.contact_email} onChange={set('contact_email')} placeholder="you@company.com"/></Field>
+            {err && <div style={{color:T.red,fontSize:14,fontWeight:600,marginBottom:12}}>{err}</div>}
+            <button style={{...btnPrimary,width:'100%',padding:'14px',fontSize:16,opacity:busy?0.6:1}} disabled={busy} onClick={start}>
+              {busy ? 'Creating your portal…' : 'Start onboarding →'}
+            </button>
+            <p style={{fontSize:12.5,color:T.textLight,textAlign:'center',marginTop:12}}>No account or password needed. You'll get a shareable link for your team.</p>
+          </div>
+        </div>
+      );
+    }
+
+    const Brand = () => (
+      <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:10}}>
+        <div style={{width:34,height:34,borderRadius:10,background:T.blue,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:15}}>ACB</div>
+        <div style={{fontWeight:700,color:T.text,fontSize:16}}>Advanced Collection Bureau</div>
+      </div>
+    );
+
+    /* ============ portal ============ */
+
+    function Portal({token}) {
+      const [session, setSession] = useState(null);
+      const [error, setError] = useState('');
+      const [toast, setToast] = useState('');
+      const [saving, setSaving] = useState(false);
+      const timers = useRef({});
+      const toastTimer = useRef(null);
+
+      const showToast = (msg) => {
+        setToast(msg);
+        clearTimeout(toastTimer.current);
+        toastTimer.current = setTimeout(() => setToast(''), 2600);
+      };
+
+      const load = useCallback(async () => {
+        try { setSession(await api(`/api/sessions/${token}`)); }
+        catch (e) { setError(e.message); }
+      }, [token]);
+
+      useEffect(() => { load(); }, [load]);
+      useEffect(() => {
+        const onFocus = () => { if (!Object.keys(timers.current).length) load(); };
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+      }, [load]);
+
+      // Debounced saves. Local state updates immediately; the server sync trails by ~700ms.
+      // Patches accumulate per target so fast edits across different fields all get saved.
+      const pending = useRef({});
+      const queue = (key, urlFor) => {
+        setSaving(true);
+        clearTimeout(timers.current[key]);
+        timers.current[key] = setTimeout(async () => {
+          delete timers.current[key];
+          const body = pending.current[key];
+          pending.current[key] = null;
+          try { const s = await api(urlFor, {method:'PATCH', body}); if (!Object.keys(timers.current).length) { setSession(s); setSaving(false); } }
+          catch (e) { setSaving(false); showToast(e.message); }
+        }, 700);
+      };
+
+      const patchSession = (patch) => {
+        setSession(s => ({...s, ...patch}));
+        pending.current['session'] = {...(pending.current['session'] || {}), ...patch};
+        queue('session', `/api/sessions/${token}`);
+      };
+      const patchEntity = (id, patch) => {
+        setSession(s => ({...s, entities: s.entities.map(e => e.id === id ? {...e, ...patch} : e)}));
+        const key = `entity-${id}`;
+        pending.current[key] = {...(pending.current[key] || {}), ...patch};
+        queue(key, `/api/sessions/${token}/entities/${id}`);
+      };
+      const addEntities = async (list) => {
+        setSession(await api(`/api/sessions/${token}/entities`, {method:'POST', body:{entities:list}}));
+      };
+      const removeEntity = async (id) => {
+        setSession(await api(`/api/sessions/${token}/entities/${id}`, {method:'DELETE'}));
+      };
+
+      if (error) return (
+        <div style={{maxWidth:520,margin:'80px auto',textAlign:'center',padding:20}}>
+          <Brand/>
+          <div style={{...card,marginTop:30,padding:'34px'}}>
+            <div style={{fontSize:19,fontWeight:700,color:T.text,marginBottom:8}}>Link not found</div>
+            <div style={{fontSize:15,color:T.textMid}}>{error}</div>
+            <a href="/" style={{...btnGhost,display:'inline-block',marginTop:18,textDecoration:'none'}}>Start a new onboarding</a>
+          </div>
+        </div>
+      );
+      if (!session) return <div style={{textAlign:'center',padding:100,color:T.textLight,fontWeight:600}}>Loading…</div>;
+
+      return (
+        <div style={{maxWidth:860,margin:'0 auto',padding:'26px 18px 90px'}}>
+          <Header session={session} saving={saving} showToast={showToast}/>
+          <ProgressStrip session={session}/>
+          <CompanySection session={session} patchSession={patchSession}/>
+          <EntitiesSection session={session} addEntities={addEntities} patchEntity={patchEntity} removeEntity={removeEntity} showToast={showToast}/>
+          <ChecksSection session={session} patchSession={patchSession} patchEntity={patchEntity}/>
+          <DocumentsSection session={session} token={token} setSession={setSession} showToast={showToast}/>
+          <SignSection session={session} token={token} setSession={setSession} showToast={showToast}/>
+          <footer style={{textAlign:'center',color:T.textLight,fontSize:13,marginTop:30,lineHeight:1.7}}>
+            Advanced Collection Bureau, Inc. · Phone (321) 633-4999 · Toll Free (877) 928-9289<br/>
+            Advancedcb.com · PO Box 560063 Rockledge, FL 32956
+          </footer>
+          <Toast msg={toast}/>
+        </div>
+      );
+    }
+
+    function Header({session, saving, showToast}) {
+      const copy = async () => {
+        try { await navigator.clipboard.writeText(window.location.href); }
+        catch (e) {
+          const ta = document.createElement('textarea');
+          ta.value = window.location.href; document.body.appendChild(ta); ta.select();
+          document.execCommand('copy'); ta.remove();
+        }
+        showToast('Link copied — anyone with it can view, edit, and sign');
+      };
+      return (
+        <div style={{marginBottom:20}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,flexWrap:'wrap'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:38,height:38,borderRadius:10,background:T.blue,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:15}}>ACB</div>
+              <div>
+                <div style={{fontWeight:800,color:T.text,fontSize:17,letterSpacing:-0.2}}>Client Onboarding</div>
+                <div style={{fontSize:13,color:T.textLight}}>{session.company_name || 'Advanced Collection Bureau'}</div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:12}}>
+              <span style={{fontSize:12.5,color:T.textLight,fontWeight:600,minWidth:56,textAlign:'right'}}>{saving ? 'Saving…' : 'Saved ✓'}</span>
+              <button style={btnGhost} onClick={copy}>🔗 Share this page</button>
+            </div>
+          </div>
+          <div style={{background:T.blueLight,border:`1px solid ${T.blueMid}`,borderRadius:12,padding:'12px 16px',marginTop:14,fontSize:14,color:T.textMid,lineHeight:1.5}}>
+            <b style={{color:T.blue}}>Everything saves automatically.</b> Share this page's link with anyone on your team —
+            accounting can fill in check details, your office manager can upload documents, and an authorized signer can sign. No logins needed.
+          </div>
+        </div>
+      );
+    }
+
+    function ProgressStrip({session}) {
+      const p = session.progress;
+      const docsDone = p.has_lease && (!p.needs_management_agreement || p.has_management_agreement);
+      const steps = [
+        {label:'Company details', done: !!(session.company_name && session.contact_name && session.mgmt_type)},
+        {label:`Entities (${p.total})`, done: p.total > 0},
+        {label:'Check details', done: p.total > 0 && (session.checks_mode === 'corporate' ? !!session.corporate_payable_to : true)},
+        {label:'Documents', done: docsDone},
+        {label:`Signatures (${p.signed}/${p.total})`, done: p.total > 0 && p.signed === p.total},
+      ];
+      return (
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:20}}>
+          {steps.map((s,i)=>(
+            <div key={i} style={{display:'flex',alignItems:'center',gap:7,background:s.done?T.greenBg:'#fff',border:`1px solid ${s.done?'#BFE8CF':T.border}`,borderRadius:50,padding:'7px 14px',fontSize:13,fontWeight:600,color:s.done?T.green:T.textMid}}>
+              <span style={{width:16,height:16,borderRadius:50,background:s.done?T.green:T.border,color:'#fff',fontSize:10.5,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800}}>{s.done?'✓':i+1}</span>
+              {s.label}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    /* ---- 1. company ---- */
+
+    function CompanySection({session, patchSession}) {
+      const done = session.company_name && session.contact_name && session.contact_email && session.mgmt_type;
+      const typeCard = (value, title, desc) => {
+        const active = session.mgmt_type === value;
+        return (
+          <div onClick={()=>patchSession({mgmt_type:value})}
+               style={{flex:'1 1 240px',cursor:'pointer',borderRadius:12,padding:'16px 18px',border:`2px solid ${active?T.blue:T.border}`,background:active?T.blueLight:'#fff',transition:'all .15s'}}>
+            <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:5}}>
+              <span style={{width:18,height:18,borderRadius:50,border:`2px solid ${active?T.blue:T.border}`,background:active?T.blue:'#fff',display:'inline-flex',alignItems:'center',justifyContent:'center'}}>
+                {active && <span style={{width:7,height:7,borderRadius:50,background:'#fff'}}/>}
+              </span>
+              <b style={{color:T.text,fontSize:15.5}}>{title}</b>
+            </div>
+            <div style={{fontSize:13.5,color:T.textMid,lineHeight:1.45}}>{desc}</div>
+          </div>
+        );
+      };
+      return (
+        <SectionCard num="1" title="Your company" subtitle="Who we'll be working with day to day." chip={<Chip tone={done?'done':'todo'}>{done?'Complete':'Needs info'}</Chip>}>
+          <Field label="Management company name"><input style={inputStyle} value={session.company_name} onChange={e=>patchSession({company_name:e.target.value})}/></Field>
+          <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+            <Field label="Point of contact" style={{flex:'1 1 200px'}}><input style={inputStyle} value={session.contact_name} onChange={e=>patchSession({contact_name:e.target.value})} placeholder="Full name"/></Field>
+            <Field label="Email" style={{flex:'1 1 220px'}}><input style={inputStyle} value={session.contact_email} onChange={e=>patchSession({contact_email:e.target.value})} placeholder="you@company.com"/></Field>
+          </div>
+          <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+            <Field label="Phone" style={{flex:'1 1 180px'}}><input style={inputStyle} value={session.contact_phone} onChange={e=>patchSession({contact_phone:e.target.value})}/></Field>
+            <Field label="Fax" hint="optional" style={{flex:'1 1 180px'}}><input style={inputStyle} value={session.contact_fax} onChange={e=>patchSession({contact_fax:e.target.value})}/></Field>
+          </div>
+          <Field label="Which best describes you?" hint="if you do both, choose third-party">
+            <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+              {typeCard('third_party','Third-Party Management','We manage properties on behalf of other owners.')}
+              {typeCard('owner_operator','Owner Operator','We own the properties we manage.')}
+            </div>
+          </Field>
+        </SectionCard>
+      );
+    }
+
+    /* ---- 2. entities ---- */
+
+    function EntitiesSection({session, addEntities, patchEntity, removeEntity, showToast}) {
+      const [draft, setDraft] = useState({legal_name:'',property_name:'',address:''});
+      const [showBulk, setShowBulk] = useState(false);
+      const [bulkText, setBulkText] = useState('');
+      const [busy, setBusy] = useState(false);
+
+      const add = async () => {
+        if (!draft.legal_name.trim()) return showToast('Enter the legal entity name first');
+        setBusy(true);
+        try { await addEntities([draft]); setDraft({legal_name:'',property_name:'',address:''}); }
+        catch (e) { showToast(e.message); }
+        setBusy(false);
+      };
+      const addBulk = async () => {
+        const list = bulkText.split('\n').map(l=>l.trim()).filter(Boolean).map(line=>{
+          const parts = line.split(/\s*[|;\t]\s*/);
+          return {legal_name:parts[0]||'', property_name:parts[1]||'', address:parts[2]||''};
+        }).filter(e=>e.legal_name);
+        if (!list.length) return showToast('Paste at least one entity name');
+        setBusy(true);
+        try { await addEntities(list); setBulkText(''); setShowBulk(false); showToast(`Added ${list.length} ${list.length===1?'entity':'entities'}`); }
+        catch (e) { showToast(e.message); }
+        setBusy(false);
+      };
+
+      return (
+        <SectionCard num="2" title="Properties & legal entities"
+          subtitle={<span>Add <b>every legal entity that appears on your lease agreements</b> — each one gets its own collection agreement. If Building 1 LLC and Building 2 LLC are on your leases, add both.</span>}
+          chip={<Chip tone={session.entities.length?'done':'todo'}>{session.entities.length ? `${session.entities.length} added` : 'Add entities'}</Chip>}>
+
+          {session.entities.map((e,idx)=>(
+            <div key={e.id} style={{border:`1px solid ${T.border}`,borderRadius:12,padding:'14px 16px',marginBottom:10,background:'#FAFBFD'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,gap:8}}>
+                <b style={{color:T.text,fontSize:14.5}}>Entity {idx+1}</b>
+                <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                  {e.signed_at ? <Chip tone="done">Signed ✓</Chip> : <Chip tone="muted">Not signed</Chip>}
+                  <button style={btnDanger} onClick={()=>removeEntity(e.id)} title="Remove entity">✕ Remove</button>
+                </div>
+              </div>
+              <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+                <Field label="Legal entity on leases" style={{flex:'2 1 220px',marginBottom:8}}><input style={inputStyle} value={e.legal_name} onChange={ev=>patchEntity(e.id,{legal_name:ev.target.value})} placeholder="Building 1 LLC"/></Field>
+                <Field label="Property / building name" hint="optional" style={{flex:'1 1 170px',marginBottom:8}}><input style={inputStyle} value={e.property_name} onChange={ev=>patchEntity(e.id,{property_name:ev.target.value})} placeholder="Sunrise Towers"/></Field>
+              </div>
+              <Field label="Property address" style={{marginBottom:2}}><input style={inputStyle} value={e.address} onChange={ev=>patchEntity(e.id,{address:ev.target.value})} placeholder="Street, City, State, ZIP"/></Field>
+              {e.signed_at && <div style={{fontSize:12,color:T.textLight,marginTop:8}}>Changing the entity name or address will void the signature — it will need to be re-signed.</div>}
+            </div>
+          ))}
+
+          <div style={{border:`2px dashed ${T.blueMid}`,borderRadius:12,padding:'16px',marginTop:6}}>
+            <b style={{fontSize:14,color:T.textMid,display:'block',marginBottom:10}}>Add an entity</b>
+            <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+              <Field label="Legal entity on leases" style={{flex:'2 1 220px',marginBottom:8}}><input style={inputStyle} value={draft.legal_name} onChange={e=>setDraft(d=>({...d,legal_name:e.target.value}))} placeholder="Building 1 LLC" onKeyDown={e=>e.key==='Enter'&&add()}/></Field>
+              <Field label="Property / building name" hint="optional" style={{flex:'1 1 170px',marginBottom:8}}><input style={inputStyle} value={draft.property_name} onChange={e=>setDraft(d=>({...d,property_name:e.target.value}))} onKeyDown={e=>e.key==='Enter'&&add()}/></Field>
+            </div>
+            <Field label="Property address" style={{marginBottom:12}}><input style={inputStyle} value={draft.address} onChange={e=>setDraft(d=>({...d,address:e.target.value}))} placeholder="Street, City, State, ZIP" onKeyDown={e=>e.key==='Enter'&&add()}/></Field>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+              <button style={{...btnPrimary,padding:'10px 22px',opacity:busy?0.6:1}} disabled={busy} onClick={add}>+ Add entity</button>
+              <button style={btnGhost} onClick={()=>setShowBulk(v=>!v)}>{showBulk?'Hide bulk add':'Paste a list instead'}</button>
+            </div>
+            {showBulk && (
+              <div style={{marginTop:14}} className="fade-in">
+                <Field label="One entity per line" hint="optionally add property name and address separated by | ">
+                  <textarea style={{...inputStyle,minHeight:110,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}
+                    placeholder={"Building 1 LLC | Sunrise Towers | 100 Main St, Melbourne, FL\nBuilding 2 LLC\nBuilding 3 LLC"}/>
+                </Field>
+                <button style={{...btnPrimary,padding:'10px 22px',opacity:busy?0.6:1}} disabled={busy} onClick={addBulk}>Add all</button>
+              </div>
+            )}
+          </div>
+        </SectionCard>
+      );
+    }
+
+    /* ---- 3. checks ---- */
+
+    function ChecksSection({session, patchSession, patchEntity}) {
+      const corp = session.checks_mode === 'corporate';
+      const done = session.entities.length > 0 && (!corp || !!session.corporate_payable_to);
+      const modeCard = (value, title, desc) => {
+        const active = corp ? value==='corporate' : value==='per_entity';
+        return (
+          <div onClick={()=>patchSession({checks_mode:value})}
+               style={{flex:'1 1 240px',cursor:'pointer',borderRadius:12,padding:'16px 18px',border:`2px solid ${active?T.blue:T.border}`,background:active?T.blueLight:'#fff'}}>
+            <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:5}}>
+              <span style={{width:18,height:18,borderRadius:50,border:`2px solid ${active?T.blue:T.border}`,background:active?T.blue:'#fff',display:'inline-flex',alignItems:'center',justifyContent:'center'}}>
+                {active && <span style={{width:7,height:7,borderRadius:50,background:'#fff'}}/>}
+              </span>
+              <b style={{color:T.text,fontSize:15.5}}>{title}</b>
+            </div>
+            <div style={{fontSize:13.5,color:T.textMid,lineHeight:1.45}}>{desc}</div>
+          </div>
+        );
+      };
+      return (
+        <SectionCard num="3" title="Where should checks go?"
+          subtitle="When we collect, we mail your portion monthly. Tell us who checks should be made out to and where to send them."
+          chip={<Chip tone={done?'done':'todo'}>{done?'Complete':'Needs info'}</Chip>}>
+          <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
+            {modeCard('corporate','One corporate check setup','All checks are made out to one entity and mailed to one address, regardless of property.')}
+            {modeCard('per_entity','Per entity','Each entity gets checks made out to it individually.')}
+          </div>
+
+          {corp ? (
+            <div className="fade-in">
+              <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+                <Field label="Make all checks payable to" style={{flex:'1 1 240px'}}>
+                  <input style={inputStyle} value={session.corporate_payable_to} onChange={e=>patchSession({corporate_payable_to:e.target.value})} placeholder="e.g. Sunrise Corporate Holdings LLC"/>
+                </Field>
+                <Field label="Mail all checks to" style={{flex:'1 1 280px'}}>
+                  <input style={inputStyle} value={session.corporate_check_address} onChange={e=>patchSession({corporate_check_address:e.target.value})} placeholder="Street or PO Box, City, State, ZIP"/>
+                </Field>
+              </div>
+              <div style={{fontSize:13,color:T.textLight}}>This applies to every agreement below — you don't need to fill anything in per entity.</div>
+            </div>
+          ) : (
+            !session.entities.length
+              ? <div style={{fontSize:14,color:T.textLight}}>Add your entities in step 2 first, then fill in check details here.</div>
+              : <div className="fade-in">
+                  {session.entities.map(e=>(
+                    <div key={e.id} style={{border:`1px solid ${T.border}`,borderRadius:12,padding:'12px 16px',marginBottom:10,background:'#FAFBFD'}}>
+                      <b style={{fontSize:14,color:T.text,display:'block',marginBottom:8}}>{e.legal_name || 'Unnamed entity'}</b>
+                      <div style={{display:'flex',gap:12,flexWrap:'wrap'}}>
+                        <Field label="Checks payable to" style={{flex:'1 1 220px',marginBottom:4}}>
+                          <input style={inputStyle} value={e.payable_to} onChange={ev=>patchEntity(e.id,{payable_to:ev.target.value})} placeholder={e.legal_name || 'Entity name'}/>
+                        </Field>
+                        <Field label="Mail checks to" style={{flex:'1 1 260px',marginBottom:4}}>
+                          <input style={inputStyle} value={e.check_address} onChange={ev=>patchEntity(e.id,{check_address:ev.target.value})} placeholder={e.address ? `Same as property (${e.address})` : 'Street or PO Box, City, State, ZIP'}/>
+                        </Field>
+                      </div>
+                      <div style={{fontSize:12,color:T.textLight}}>Leave blank to use the entity's own name and property address.</div>
+                    </div>
+                  ))}
+                </div>
+          )}
+        </SectionCard>
+      );
+    }
+
+    /* ---- 4. documents ---- */
+
+    function DocumentsSection({session, token, setSession, showToast}) {
+      const p = session.progress;
+      const thirdParty = session.mgmt_type === 'third_party';
+      const done = p.has_lease && (!p.needs_management_agreement || p.has_management_agreement);
+
+      const UploadBox = ({kind, title, desc, required, has}) => {
+        const inputRef = useRef(null);
+        const [drag, setDrag] = useState(false);
+        const [busy, setBusy] = useState(false);
+        const files = session.files.filter(f=>f.kind===kind);
+        const send = async (fileList) => {
+          setBusy(true);
+          for (const file of Array.from(fileList)) {
+            const fd = new FormData();
+            fd.append('kind', kind);
+            fd.append('file', file);
+            try { setSession(await api(`/api/sessions/${token}/files`, {method:'POST', body:fd})); }
+            catch (e) { showToast(e.message); }
+          }
+          setBusy(false);
+        };
+        const remove = async (id) => {
+          try { setSession(await api(`/api/sessions/${token}/files/${id}`, {method:'DELETE'})); }
+          catch (e) { showToast(e.message); }
+        };
+        return (
+          <div style={{flex:'1 1 300px',border:`2px dashed ${drag?T.blue:has?'#BFE8CF':T.blueMid}`,background:drag?T.blueLight:has?T.greenBg:'#fff',borderRadius:12,padding:'18px',transition:'all .15s'}}
+               onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
+               onDrop={e=>{e.preventDefault();setDrag(false);send(e.dataTransfer.files);}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginBottom:4}}>
+              <b style={{fontSize:15,color:T.text}}>{title}</b>
+              {has ? <Chip tone="done">Uploaded ✓</Chip> : required ? <Chip tone="todo">Required</Chip> : <Chip tone="muted">Optional</Chip>}
+            </div>
+            <div style={{fontSize:13.5,color:T.textMid,lineHeight:1.5,marginBottom:12}}>{desc}</div>
+            {files.map(f=>(
+              <div key={f.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,background:'#fff',border:`1px solid ${T.border}`,borderRadius:10,padding:'8px 12px',marginBottom:8}}>
+                <a href={`/api/sessions/${token}/files/${f.id}/download`} style={{fontSize:13.5,fontWeight:600,color:T.blue,textDecoration:'none',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>📄 {f.original_name}</a>
+                <span style={{display:'flex',gap:6,alignItems:'center'}}>
+                  <span style={{fontSize:12,color:T.textLight}}>{(f.size/1024/1024).toFixed(1)} MB</span>
+                  <button style={btnDanger} onClick={()=>remove(f.id)}>✕</button>
+                </span>
+              </div>
+            ))}
+            <button style={{...btnGhost,opacity:busy?0.6:1}} disabled={busy} onClick={()=>inputRef.current.click()}>
+              {busy ? 'Uploading…' : files.length ? '+ Add another file' : '⬆ Upload or drop a file'}
+            </button>
+            <input ref={inputRef} type="file" multiple accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.heic,.webp" style={{display:'none'}} onChange={e=>{send(e.target.files);e.target.value='';}}/>
+          </div>
+        );
+      };
+
+      return (
+        <SectionCard num="4" title="Documents" subtitle="A couple of attachments so we can verify placements quickly." chip={<Chip tone={done?'done':'todo'}>{done?'Complete':'Needs files'}</Chip>}>
+          <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+            <UploadBox kind="lease" title="Your lease" required has={p.has_lease}
+              desc="A copy of the lease agreement you use across your properties (a blank template or a recent example is fine)."/>
+            {thirdParty && (
+              <UploadBox kind="management_agreement" title="Management agreement" required has={p.has_management_agreement}
+                desc="Since you manage on behalf of owners, attach a copy of your management agreement."/>
+            )}
+          </div>
+          {!session.mgmt_type && <div style={{fontSize:13,color:T.textLight,marginTop:12}}>Tip: choose Third-Party or Owner Operator in step 1 — third-party managers also need to attach their management agreement.</div>}
+        </SectionCard>
+      );
+    }
+
+    /* ---- 5. sign ---- */
+
+    function SignSection({session, token, setSession, showToast}) {
+      const entities = session.entities.filter(e=>e.legal_name);
+      const unsigned = entities.filter(e=>!e.signed_at);
+      const [selected, setSelected] = useState(null); // null = all unsigned
+      const [name, setName] = useState('');
+      const [title, setTitle] = useState('');
+      const [mode, setMode] = useState('draw');
+      const [typed, setTyped] = useState('');
+      const [authorized, setAuthorized] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const [celebrate, setCelebrate] = useState(false);
+      const canvasRef = useRef(null);
+      const drawn = useRef(false);
+      const ids = selected === null ? unsigned.map(e=>e.id) : selected;
+      const allSigned = entities.length > 0 && unsigned.length === 0;
+
+      const toggle = (id) => {
+        const cur = new Set(selected === null ? unsigned.map(e=>e.id) : selected);
+        cur.has(id) ? cur.delete(id) : cur.add(id);
+        setSelected([...cur]);
+      };
+
+      /* drawing */
+      useEffect(() => {
+        const cv = canvasRef.current;
+        if (!cv || mode !== 'draw') return;
+        const ctx = cv.getContext('2d');
+        ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#1A1A2E';
+        let active = false;
+        const pos = (e) => {
+          const r = cv.getBoundingClientRect();
+          return { x: (e.clientX - r.left) * (cv.width / r.width), y: (e.clientY - r.top) * (cv.height / r.height) };
+        };
+        const down = (e) => { active = true; drawn.current = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); cv.setPointerCapture(e.pointerId); };
+        const move = (e) => { if (!active) return; const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); };
+        const up = () => { active = false; };
+        cv.addEventListener('pointerdown', down);
+        cv.addEventListener('pointermove', move);
+        cv.addEventListener('pointerup', up);
+        return () => { cv.removeEventListener('pointerdown', down); cv.removeEventListener('pointermove', move); cv.removeEventListener('pointerup', up); };
+      }, [mode]);
+
+      const clearCanvas = () => {
+        const cv = canvasRef.current;
+        if (cv) cv.getContext('2d').clearRect(0,0,cv.width,cv.height);
+        drawn.current = false;
+      };
+
+      const buildSignature = async () => {
+        if (mode === 'draw') {
+          if (!drawn.current) throw new Error('Please draw your signature first.');
+          return canvasRef.current.toDataURL('image/png');
+        }
+        const text = (typed || name).trim();
+        if (!text) throw new Error('Type your signature first.');
+        await document.fonts.load('600 64px Caveat');
+        const cv = document.createElement('canvas');
+        cv.width = 640; cv.height = 160;
+        const ctx = cv.getContext('2d');
+        ctx.font = '600 64px Caveat, cursive';
+        ctx.fillStyle = '#1A1A2E';
+        ctx.textBaseline = 'middle';
+        let size = 64;
+        while (size > 22 && ctx.measureText(text).width > 600) { size -= 4; ctx.font = `600 ${size}px Caveat, cursive`; }
+        ctx.fillText(text, 20, 84);
+        return cv.toDataURL('image/png');
+      };
+
+      const sign = async () => {
+        if (!name.trim()) return showToast('Enter the full name of the person signing');
+        if (!authorized) return showToast('Please confirm you are authorized to sign');
+        if (!ids.length) return showToast('Select at least one agreement');
+        setBusy(true);
+        try {
+          const signature = await buildSignature();
+          const s = await api(`/api/sessions/${token}/sign`, {method:'POST', body:{entity_ids:ids, signer_name:name, signer_title:title, signature}});
+          setSession(s);
+          setSelected(null);
+          setCelebrate(true);
+          setTimeout(()=>setCelebrate(false), 4500);
+          showToast(`Signed ${s.signed} agreement${s.signed===1?'':'s'} 🎉`);
+        } catch (e) { showToast(e.message); }
+        setBusy(false);
+      };
+
+      return (
+        <SectionCard num="5" title="Review & sign"
+          subtitle={entities.length ? `One agreement per entity — ${entities.length} total. One authorized signature covers all of them at once.` : 'Add your entities in step 2, then sign all the agreements here in one go.'}
+          chip={<Chip tone={allSigned?'done':entities.length?'todo':'muted'}>{allSigned?'All signed':entities.length?`${unsigned.length} to sign`:'Waiting on entities'}</Chip>}>
+          {celebrate && <Confetti/>}
+
+          {entities.map(e=>{
+            const pay = e.resolved_payment || {};
+            const checked = e.signed_at ? false : ids.includes(e.id);
+            return (
+              <div key={e.id} style={{display:'flex',alignItems:'center',gap:12,border:`1px solid ${e.signed_at?'#BFE8CF':T.border}`,background:e.signed_at?T.greenBg:'#FAFBFD',borderRadius:12,padding:'12px 16px',marginBottom:8,flexWrap:'wrap'}}>
+                {!e.signed_at && (
+                  <input type="checkbox" checked={checked} onChange={()=>toggle(e.id)} style={{width:18,height:18,accentColor:T.blue,cursor:'pointer'}}/>
+                )}
+                <div style={{flex:'1 1 220px'}}>
+                  <b style={{fontSize:14.5,color:T.text}}>{e.legal_name}</b>{e.property_name && <span style={{color:T.textLight,fontSize:13.5}}> · {e.property_name}</span>}
+                  <div style={{fontSize:12.5,color:T.textLight,marginTop:2}}>Checks payable to {pay.payableTo || e.legal_name}{pay.address ? ` → ${pay.address}` : ''}</div>
+                  {e.signed_at && <div style={{fontSize:12.5,color:T.green,fontWeight:700,marginTop:2}}>Signed by {e.signer_name}{e.signer_title?`, ${e.signer_title}`:''} on {new Date(e.signed_at).toLocaleDateString()}</div>}
+                </div>
+                <a href={`/api/sessions/${token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'8px 15px'}}>
+                  {e.signed_at ? 'View signed PDF' : 'Preview agreement'}
+                </a>
+              </div>
+            );
+          })}
+
+          {entities.length > 0 && !allSigned && (
+            <div style={{border:`1px solid ${T.border}`,borderRadius:12,padding:'18px',marginTop:14,background:'#fff'}}>
+              <b style={{fontSize:15,color:T.text,display:'block',marginBottom:12}}>Signature</b>
+              <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+                <Field label="Signer's full name" hint="an individual, not the company" style={{flex:'1 1 220px'}}>
+                  <input style={inputStyle} value={name} onChange={e=>setName(e.target.value)} placeholder="Jane Smith"/>
+                </Field>
+                <Field label="Title" hint="optional" style={{flex:'1 1 180px'}}>
+                  <input style={inputStyle} value={title} onChange={e=>setTitle(e.target.value)} placeholder="Regional Manager"/>
+                </Field>
+              </div>
+              <div style={{display:'flex',gap:8,marginBottom:10}}>
+                {['draw','type'].map(m=>(
+                  <button key={m} onClick={()=>setMode(m)} style={{...btnGhost,background:mode===m?T.blue:T.blueLight,color:mode===m?'#fff':T.blue,padding:'7px 18px',fontSize:13.5}}>
+                    {m==='draw'?'✍ Draw':'⌨ Type'}
+                  </button>
+                ))}
+              </div>
+              {mode==='draw' ? (
+                <div style={{marginBottom:12}}>
+                  <canvas ref={canvasRef} width={640} height={160} style={{width:'100%',maxWidth:640,height:150,border:`1.5px solid ${T.border}`,borderRadius:10,background:'#fff',touchAction:'none',cursor:'crosshair',display:'block'}}/>
+                  <button style={{...btnDanger,marginTop:4}} onClick={clearCanvas}>Clear</button>
+                </div>
+              ) : (
+                <div style={{marginBottom:12}}>
+                  <input style={{...inputStyle,maxWidth:640,fontFamily:'Caveat, cursive',fontSize:34,fontWeight:600,padding:'8px 16px'}} value={typed} onChange={e=>setTyped(e.target.value)} placeholder={name || 'Type your signature'}/>
+                </div>
+              )}
+              <label style={{display:'flex',gap:10,alignItems:'flex-start',fontSize:13.5,color:T.textMid,lineHeight:1.5,marginBottom:16,cursor:'pointer',maxWidth:640}}>
+                <input type="checkbox" checked={authorized} onChange={e=>setAuthorized(e.target.checked)} style={{width:17,height:17,accentColor:T.blue,marginTop:2,cursor:'pointer'}}/>
+                <span>I affirm that I am authorized to enter into agreements on behalf of the {ids.length===1?'entity':'entities'} selected above, and I agree to the terms of the Agreement for Collection Services shown in each preview.</span>
+              </label>
+              <button style={{...btnPrimary,fontSize:16,padding:'13px 30px',opacity:busy?0.6:1}} disabled={busy} onClick={sign}>
+                {busy ? 'Signing…' : `Sign ${ids.length} agreement${ids.length===1?'':'s'}`}
+              </button>
+              {unsigned.length>1 && <div style={{fontSize:12.5,color:T.textLight,marginTop:8}}>All unsigned agreements are selected by default — uncheck any you're not authorized to sign, and share this link with whoever is.</div>}
+            </div>
+          )}
+
+          {allSigned && (
+            <div style={{background:T.greenBg,border:'1px solid #BFE8CF',borderRadius:12,padding:'20px 22px',marginTop:14}} className="fade-in">
+              <div style={{fontSize:17,fontWeight:800,color:T.green,marginBottom:6}}>🎉 You're all set!</div>
+              <div style={{fontSize:14.5,color:T.textMid,lineHeight:1.6,marginBottom:14}}>
+                All {entities.length} agreement{entities.length===1?' is':'s are'} signed. Advanced Collection Bureau will countersign and send back your copies,
+                assign your client number{entities.length===1?'':'s'}, and reach out with next steps for placing accounts.
+              </div>
+              <a href={`/api/sessions/${token}/agreements.pdf`} target="_blank" rel="noopener" style={{...btnPrimary,textDecoration:'none',display:'inline-block'}}>⬇ Download all signed agreements (PDF)</a>
+            </div>
+          )}
+        </SectionCard>
+      );
+    }
+
+    /* ============ admin ============ */
+
+    function Admin() {
+      const [key, setKey] = useState(localStorage.getItem('acb_admin_key') || '');
+      const [sessions, setSessions] = useState(null);
+      const [err, setErr] = useState('');
+      const load = async (k) => {
+        try {
+          const data = await api(`/api/admin/sessions?key=${encodeURIComponent(k)}`);
+          localStorage.setItem('acb_admin_key', k);
+          setSessions(data); setErr('');
+        } catch (e) { setErr(e.message); setSessions(null); }
+      };
+      useEffect(() => { if (key) load(key); }, []);
+      return (
+        <div style={{maxWidth:960,margin:'0 auto',padding:'30px 18px 80px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12,marginBottom:20}}>
+            <Brand/>
+            <div style={{display:'flex',gap:8}}>
+              <input style={{...inputStyle,width:220}} type="password" placeholder="Admin key" value={key} onChange={e=>setKey(e.target.value)} onKeyDown={e=>e.key==='Enter'&&load(key)}/>
+              <button style={btnPrimary} onClick={()=>load(key)}>Load</button>
+            </div>
+          </div>
+          {err && <div style={{color:T.red,fontWeight:600,marginBottom:14}}>{err}</div>}
+          {sessions && !sessions.length && <div style={{color:T.textLight}}>No onboardings yet.</div>}
+          {sessions && sessions.map(s=>(
+            <div key={s.token} style={card}>
+              <div style={{display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',marginBottom:8}}>
+                <div>
+                  <b style={{fontSize:17,color:T.text}}>{s.company_name || '(no company name)'}</b>
+                  <div style={{fontSize:13.5,color:T.textLight}}>{s.contact_name} · {s.contact_email} · {s.contact_phone} · {s.mgmt_type==='third_party'?'Third-Party':s.mgmt_type==='owner_operator'?'Owner Operator':'type not set'}</div>
+                </div>
+                <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                  {s.completed_at ? <Chip tone="done">Complete ✓</Chip> : <Chip tone="todo">{s.progress.signed}/{s.progress.total} signed</Chip>}
+                  <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/o/${s.token}`} target="_blank" rel="noopener">Open portal</a>
+                  {s.progress.total > 0 && <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/api/sessions/${s.token}/agreements.pdf`} target="_blank" rel="noopener">All PDFs</a>}
+                </div>
+              </div>
+              {s.entities.map(e=>(
+                <div key={e.id} style={{fontSize:13.5,color:T.textMid,padding:'6px 0',borderTop:`1px solid ${T.border}`,display:'flex',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
+                  <span><b style={{color:T.text}}>{e.legal_name}</b>{e.property_name?` · ${e.property_name}`:''} — payable to {e.resolved_payment.payableTo}{e.resolved_payment.address?`, ${e.resolved_payment.address}`:''}</span>
+                  <span>{e.signed_at ? <span style={{color:T.green,fontWeight:700}}>Signed by {e.signer_name} {new Date(e.signed_at).toLocaleDateString()}</span> : <span style={{color:T.warn,fontWeight:700}}>Unsigned</span>}</span>
+                </div>
+              ))}
+              {s.files.length > 0 && (
+                <div style={{fontSize:13,color:T.textLight,marginTop:8}}>
+                  Files: {s.files.map(f=>(
+                    <a key={f.id} href={`/api/sessions/${s.token}/files/${f.id}/download`} style={{color:T.blue,marginRight:10}}>{f.kind==='management_agreement'?'Mgmt agreement':f.kind==='lease'?'Lease':'File'}: {f.original_name}</a>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    /* ============ router ============ */
+
+    function App() {
+      const path = window.location.pathname;
+      const m = path.match(/^\/o\/([A-Za-z0-9_-]+)/);
+      if (m) return <Portal token={m[1]}/>;
+      if (path === '/admin') return <Admin/>;
+      return <Landing/>;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+  </script>
+</body>
+</html>
