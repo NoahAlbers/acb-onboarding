@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const { db, UPLOAD_DIR } = require('./db');
 const { buildAgreementPdf, buildAllAgreementsPdf, resolvePayment } = require('./lib/agreement-pdf');
+const docuseal = require('./lib/docuseal');
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || 'acb-admin-2026';
@@ -50,6 +51,7 @@ function serializeSession(session) {
   const hasMgmt = files.some((f) => f.kind === 'management_agreement');
   return {
     token: session.token,
+    signing_mode: docuseal.enabled() ? 'docuseal' : 'builtin',
     company_name: session.company_name,
     contact_name: session.contact_name,
     contact_email: session.contact_email,
@@ -72,6 +74,9 @@ function serializeSession(session) {
       signer_name: e.signer_name,
       signer_title: e.signer_title,
       signed_at: e.signed_at,
+      sign_url: e.signed_at ? null : docuseal.signUrl(e.docuseal_slug),
+      docuseal_pending: !!(e.docuseal_submission_id && !e.signed_at),
+      signed_doc_url: e.signed_doc_url,
       resolved_payment: resolvePayment(session, e),
     })),
     files,
@@ -210,9 +215,11 @@ app.patch('/api/sessions/:token/entities/:id', requireSession, (req, res) => {
     const material = ['legal_name', 'address'].some(
       (f) => f in req.body && String(req.body[f] ?? '').trim() !== entity[f]
     );
-    if (entity.signed_at && material) {
-      updates.push("signer_name = NULL", "signer_title = NULL", "signature = NULL", "signed_at = NULL", "signed_ip = NULL");
+    if (material && (entity.signed_at || entity.docuseal_submission_id)) {
+      updates.push("signer_name = NULL", "signer_title = NULL", "signature = NULL", "signed_at = NULL", "signed_ip = NULL",
+                   "docuseal_submission_id = NULL", "docuseal_slug = NULL", "signed_doc_url = NULL");
       db.prepare('UPDATE sessions SET completed_at = NULL, notified_at = NULL WHERE id = ?').run(req.session.id);
+      if (entity.docuseal_submission_id) docuseal.archiveSubmission(entity.docuseal_submission_id);
     }
     values.push(req.params.id, req.session.id);
     db.prepare(`UPDATE entities SET ${updates.join(', ')} WHERE id = ? AND session_id = ?`).run(...values);
@@ -253,6 +260,108 @@ app.post('/api/sessions/:token/sign', requireSession, async (req, res) => {
   res.json({ signed, ...serializeSession(getSession(req.params.token)) });
 });
 
+/* ---------- DocuSeal signing ---------- */
+
+const baseUrl = (req) => process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+
+function markEntitySigned(sessionId, entityId, status) {
+  db.prepare(
+    `UPDATE entities SET signed_at = ?, signer_name = COALESCE(?, signer_name), signed_doc_url = ?
+     WHERE id = ? AND session_id = ? AND signed_at IS NULL`
+  ).run(status.completed_at || now(), status.signer_name, status.document_url, entityId, sessionId);
+}
+
+// Pull latest status from DocuSeal for every entity with an in-flight submission.
+async function refreshDocusealStatuses(session) {
+  if (!docuseal.enabled()) return;
+  const pending = db
+    .prepare('SELECT * FROM entities WHERE session_id = ? AND docuseal_submission_id IS NOT NULL AND signed_at IS NULL')
+    .all(session.id);
+  for (const entity of pending) {
+    try {
+      const status = await docuseal.getSubmissionStatus(entity.docuseal_submission_id);
+      if (status.completed) markEntitySigned(session.id, entity.id, status);
+    } catch (e) {
+      console.error(`DocuSeal status refresh failed for entity ${entity.id}:`, e.message);
+    }
+  }
+  if (pending.length) { touch(session.id); await maybeNotifyCompleted(session); }
+}
+
+// Create submissions for all (or selected) unsigned entities and hand back the first signing link.
+app.post('/api/sessions/:token/docuseal/start', requireSession, async (req, res) => {
+  if (!docuseal.enabled()) return res.status(400).json({ error: 'DocuSeal signing is not configured on this server.' });
+  const { signer_name, signer_title, signer_email, entity_ids } = req.body || {};
+  const signer = {
+    name: String(signer_name || '').trim(),
+    title: String(signer_title || '').trim(),
+    email: String(signer_email || '').trim(),
+  };
+  if (!signer.name) return res.status(400).json({ error: 'Please enter the full name of the person signing.' });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(signer.email)) return res.status(400).json({ error: 'Please enter a valid email for the signer.' });
+
+  const wanted = Array.isArray(entity_ids) && entity_ids.length ? entity_ids.map(Number) : null;
+  const entities = db
+    .prepare("SELECT * FROM entities WHERE session_id = ? AND legal_name != '' AND signed_at IS NULL ORDER BY id")
+    .all(req.session.id)
+    .filter((e) => !wanted || wanted.includes(e.id));
+  if (!entities.length) return res.status(400).json({ error: 'There are no unsigned agreements to send for signature.' });
+
+  const redirect = `${baseUrl(req)}/api/sessions/${req.session.token}/docuseal/next`;
+  try {
+    for (const entity of entities) {
+      if (entity.docuseal_submission_id) continue; // already prepared — reuse the existing signing link
+      const sub = await docuseal.createEntitySubmission(req.session, entity, signer, redirect);
+      db.prepare(
+        'UPDATE entities SET docuseal_submission_id = ?, docuseal_slug = ?, signer_name = ?, signer_title = ?, signer_email = ? WHERE id = ?'
+      ).run(sub.submission_id, sub.slug, signer.name, signer.title, signer.email, entity.id);
+    }
+  } catch (e) {
+    console.error('DocuSeal submission creation failed:', e.message);
+    return res.status(502).json({ error: 'Could not reach the e-sign service. Please try again in a moment.' });
+  }
+  touch(req.session.id);
+  const first = db
+    .prepare('SELECT docuseal_slug FROM entities WHERE session_id = ? AND signed_at IS NULL AND docuseal_slug IS NOT NULL ORDER BY id LIMIT 1')
+    .get(req.session.id);
+  res.json({ next_url: docuseal.signUrl(first && first.docuseal_slug), ...serializeSession(getSession(req.params.token)) });
+});
+
+// After each DocuSeal signature, chain straight into the next unsigned agreement.
+app.get('/api/sessions/:token/docuseal/next', requireSession, async (req, res) => {
+  await refreshDocusealStatuses(req.session);
+  const next = db
+    .prepare('SELECT docuseal_slug FROM entities WHERE session_id = ? AND signed_at IS NULL AND docuseal_slug IS NOT NULL ORDER BY id LIMIT 1')
+    .get(req.session.id);
+  if (next) return res.redirect(docuseal.signUrl(next.docuseal_slug));
+  res.redirect(`/o/${req.session.token}?celebrate=1`);
+});
+
+app.post('/api/sessions/:token/docuseal/refresh', requireSession, async (req, res) => {
+  await refreshDocusealStatuses(req.session);
+  res.json(serializeSession(getSession(req.params.token)));
+});
+
+// Optional push notifications from DocuSeal (Settings → Webhooks). Polling covers us without it.
+app.post('/api/docuseal/webhook', async (req, res) => {
+  const secret = process.env.DOCUSEAL_WEBHOOK_KEY;
+  if (secret && req.query.key !== secret) return res.status(401).end();
+  try {
+    const data = (req.body && req.body.data) || {};
+    const submissionId = data.submission_id || data.id;
+    const entity = submissionId
+      ? db.prepare('SELECT * FROM entities WHERE docuseal_submission_id = ?').get(submissionId)
+      : null;
+    if (entity) {
+      const session = db.prepare('SELECT * FROM sessions WHERE id = ?').get(entity.session_id);
+      await refreshDocusealStatuses(session);
+    }
+  } catch (e) {
+    console.error('DocuSeal webhook handling failed:', e.message);
+  }
+  res.json({ ok: true });
+});
+
 /* ---------- files ---------- */
 
 app.post('/api/sessions/:token/files', requireSession, (req, res) => {
@@ -289,7 +398,9 @@ app.delete('/api/sessions/:token/files/:id', requireSession, (req, res) => {
 app.get('/api/sessions/:token/entities/:id/agreement.pdf', requireSession, async (req, res) => {
   const entity = db.prepare('SELECT * FROM entities WHERE id = ? AND session_id = ?').get(req.params.id, req.session.id);
   if (!entity) return res.status(404).json({ error: 'Entity not found' });
-  const bytes = await buildAgreementPdf(req.session, entity);
+  // DocuSeal-signed agreements live on DocuSeal (with their audit trail) — link straight to them.
+  if (entity.signed_doc_url) return res.redirect(entity.signed_doc_url);
+  const { bytes } = await buildAgreementPdf(req.session, entity);
   const safe = (entity.legal_name || 'agreement').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `inline; filename="collection-agreement-${safe}.pdf"`);

@@ -59,4 +59,14 @@ CREATE TABLE IF NOT EXISTS files (
 CREATE INDEX IF NOT EXISTS idx_files_session ON files(session_id);
 `);
 
+// Additive migrations for databases created before DocuSeal integration.
+for (const col of [
+  'docuseal_submission_id INTEGER',
+  'docuseal_slug TEXT',
+  'signed_doc_url TEXT',
+  'signer_email TEXT',
+]) {
+  try { db.exec(`ALTER TABLE entities ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
+}
+
 module.exports = { db, DATA_DIR, UPLOAD_DIR };

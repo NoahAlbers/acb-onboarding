@@ -1,0 +1,52 @@
+# One-box deployment: the portal + Caddy (automatic HTTPS).
+#
+#   1. Copy .env.example to .env and fill it in
+#   2. Point your domain's A record at this server
+#   3. DOMAIN=onboard.example.com docker compose up -d
+#
+# Optionally uncomment the docuseal service to self-host DocuSeal on the same box
+# (free/open source, full API included) instead of paying for DocuSeal cloud Pro.
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - app-data:/data
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - DOMAIN=${DOMAIN:?set DOMAIN, e.g. onboard.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  # docuseal:
+  #   image: docuseal/docuseal:latest
+  #   restart: unless-stopped
+  #   expose:
+  #     - "3000"
+  #   volumes:
+  #     - docuseal-data:/data
+  #   environment:
+  #     - FORCE_SSL=true
+  #   # Then in .env:
+  #   #   DOCUSEAL_API_URL=http://docuseal:3000/api
+  #   #   DOCUSEAL_SIGN_URL=https://sign.example.com/s
+  #   #   DOCUSEAL_API_KEY=<from your self-hosted DocuSeal settings>
+  #   # and add a second site to the Caddyfile for sign.example.com -> docuseal:3000
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
+  # docuseal-data:

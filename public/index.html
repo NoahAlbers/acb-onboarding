@@ -170,12 +170,27 @@
         toastTimer.current = setTimeout(() => setToast(''), 2600);
       };
 
+      const [celebrate, setCelebrate] = useState(false);
       const load = useCallback(async () => {
-        try { setSession(await api(`/api/sessions/${token}`)); }
+        try {
+          let s = await api(`/api/sessions/${token}`);
+          // Pick up signatures completed over on DocuSeal since we last looked.
+          if (s.entities.some(e => e.docuseal_pending)) {
+            s = await api(`/api/sessions/${token}/docuseal/refresh`, {method:'POST'});
+          }
+          setSession(s);
+        }
         catch (e) { setError(e.message); }
       }, [token]);
 
-      useEffect(() => { load(); }, [load]);
+      useEffect(() => {
+        load();
+        if (new URLSearchParams(window.location.search).get('celebrate')) {
+          setCelebrate(true);
+          setTimeout(() => setCelebrate(false), 4500);
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+      }, [load]);
       useEffect(() => {
         const onFocus = () => { if (!Object.keys(timers.current).length) load(); };
         window.addEventListener('focus', onFocus);
@@ -236,6 +251,7 @@
           <ChecksSection session={session} patchSession={patchSession} patchEntity={patchEntity}/>
           <DocumentsSection session={session} token={token} setSession={setSession} showToast={showToast}/>
           <SignSection session={session} token={token} setSession={setSession} showToast={showToast}/>
+          {celebrate && <Confetti/>}
           <footer style={{textAlign:'center',color:T.textLight,fontSize:13,marginTop:30,lineHeight:1.7}}>
             Advanced Collection Bureau, Inc. · Phone (321) 633-4999 · Toll Free (877) 928-9289<br/>
             Advancedcb.com · PO Box 560063 Rockledge, FL 32956
@@ -550,13 +566,47 @@
 
     /* ---- 5. sign ---- */
 
+    // The "final check" a client sees before anything is sent to ACB.
+    function readiness(session) {
+      const p = session.progress;
+      const entities = session.entities.filter(e=>e.legal_name);
+      const items = [
+        {ok: !!(session.company_name && session.contact_name && session.contact_email), label:'Company & contact info filled in', fix:'step 1'},
+        {ok: !!session.mgmt_type, label:'Third-party or owner operator selected', fix:'step 1'},
+        {ok: entities.length > 0, label: entities.length ? `${entities.length} legal ${entities.length===1?'entity':'entities'} added` : 'At least one legal entity added', fix:'step 2'},
+        {ok: entities.length > 0 && entities.every(e=>e.address), label:'Every entity has an address', fix:'step 2'},
+        {ok: session.checks_mode !== 'corporate' || !!(session.corporate_payable_to && session.corporate_check_address), label:'Check details complete', fix:'step 3'},
+        {ok: p.has_lease, label:'Lease attached', fix:'step 4'},
+      ];
+      if (p.needs_management_agreement) items.push({ok: p.has_management_agreement, label:'Management agreement attached', fix:'step 4'});
+      return {items, ready: items.every(i=>i.ok)};
+    }
+
+    function FinalCheck({session}) {
+      const {items, ready} = readiness(session);
+      return (
+        <div style={{border:`1px solid ${ready?'#BFE8CF':T.border}`,background:ready?T.greenBg:'#FAFBFD',borderRadius:12,padding:'16px 18px',marginBottom:14}}>
+          <b style={{fontSize:14.5,color:T.text,display:'block',marginBottom:10}}>{ready ? 'Everything looks good — ready to sign' : 'Final check — a few things left before signing'}</b>
+          {items.map((it,i)=>(
+            <div key={i} style={{display:'flex',alignItems:'center',gap:9,fontSize:13.5,color:it.ok?T.textMid:T.text,padding:'3px 0'}}>
+              <span style={{width:17,height:17,borderRadius:50,background:it.ok?T.green:T.warnBg,border:it.ok?'none':`1.5px solid ${T.warn}`,color:'#fff',fontSize:10.5,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800}}>{it.ok?'✓':''}</span>
+              <span>{it.label}{!it.ok && <span style={{color:T.warn,fontWeight:700}}> — see {it.fix}</span>}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
     function SignSection({session, token, setSession, showToast}) {
+      const mode = session.signing_mode;
       const entities = session.entities.filter(e=>e.legal_name);
       const unsigned = entities.filter(e=>!e.signed_at);
+      const {ready} = readiness(session);
       const [selected, setSelected] = useState(null); // null = all unsigned
       const [name, setName] = useState('');
       const [title, setTitle] = useState('');
-      const [mode, setMode] = useState('draw');
+      const [email, setEmail] = useState(session.contact_email || '');
+      const [sigMode, setSigMode] = useState('draw');
       const [typed, setTyped] = useState('');
       const [authorized, setAuthorized] = useState(false);
       const [busy, setBusy] = useState(false);
@@ -575,7 +625,7 @@
       /* drawing */
       useEffect(() => {
         const cv = canvasRef.current;
-        if (!cv || mode !== 'draw') return;
+        if (!cv || sigMode !== 'draw') return;
         const ctx = cv.getContext('2d');
         ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#1A1A2E';
         let active = false;
@@ -590,7 +640,7 @@
         cv.addEventListener('pointermove', move);
         cv.addEventListener('pointerup', up);
         return () => { cv.removeEventListener('pointerdown', down); cv.removeEventListener('pointermove', move); cv.removeEventListener('pointerup', up); };
-      }, [mode]);
+      }, [sigMode]);
 
       const clearCanvas = () => {
         const cv = canvasRef.current;
@@ -599,7 +649,7 @@
       };
 
       const buildSignature = async () => {
-        if (mode === 'draw') {
+        if (sigMode === 'draw') {
           if (!drawn.current) throw new Error('Please draw your signature first.');
           return canvasRef.current.toDataURL('image/png');
         }
@@ -619,6 +669,7 @@
       };
 
       const sign = async () => {
+        if (!ready) return showToast('Finish the final-check items above first');
         if (!name.trim()) return showToast('Enter the full name of the person signing');
         if (!authorized) return showToast('Please confirm you are authorized to sign');
         if (!ids.length) return showToast('Select at least one agreement');
@@ -646,14 +697,18 @@
             const checked = e.signed_at ? false : ids.includes(e.id);
             return (
               <div key={e.id} style={{display:'flex',alignItems:'center',gap:12,border:`1px solid ${e.signed_at?'#BFE8CF':T.border}`,background:e.signed_at?T.greenBg:'#FAFBFD',borderRadius:12,padding:'12px 16px',marginBottom:8,flexWrap:'wrap'}}>
-                {!e.signed_at && (
+                {!e.signed_at && mode==='builtin' && (
                   <input type="checkbox" checked={checked} onChange={()=>toggle(e.id)} style={{width:18,height:18,accentColor:T.blue,cursor:'pointer'}}/>
                 )}
                 <div style={{flex:'1 1 220px'}}>
                   <b style={{fontSize:14.5,color:T.text}}>{e.legal_name}</b>{e.property_name && <span style={{color:T.textLight,fontSize:13.5}}> · {e.property_name}</span>}
                   <div style={{fontSize:12.5,color:T.textLight,marginTop:2}}>Checks payable to {pay.payableTo || e.legal_name}{pay.address ? ` → ${pay.address}` : ''}</div>
                   {e.signed_at && <div style={{fontSize:12.5,color:T.green,fontWeight:700,marginTop:2}}>Signed by {e.signer_name}{e.signer_title?`, ${e.signer_title}`:''} on {new Date(e.signed_at).toLocaleDateString()}</div>}
+                  {!e.signed_at && e.docuseal_pending && <div style={{fontSize:12.5,color:T.warn,fontWeight:700,marginTop:2}}>Awaiting signature</div>}
                 </div>
+                {!e.signed_at && e.sign_url && (
+                  <a href={e.sign_url} style={{...btnPrimary,textDecoration:'none',fontSize:13,padding:'8px 16px'}}>Sign now</a>
+                )}
                 <a href={`/api/sessions/${token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'8px 15px'}}>
                   {e.signed_at ? 'View signed PDF' : 'Preview agreement'}
                 </a>
@@ -661,7 +716,15 @@
             );
           })}
 
-          {entities.length > 0 && !allSigned && (
+          {entities.length > 0 && !allSigned && <div style={{marginTop:14}}><FinalCheck session={session}/></div>}
+
+          {entities.length > 0 && !allSigned && mode==='docuseal' && (
+            <DocusealSign session={session} token={token} setSession={setSession} showToast={showToast}
+                          ready={ready} unsigned={unsigned}
+                          name={name} setName={setName} title={title} setTitle={setTitle} email={email} setEmail={setEmail}/>
+          )}
+
+          {entities.length > 0 && !allSigned && mode==='builtin' && (
             <div style={{border:`1px solid ${T.border}`,borderRadius:12,padding:'18px',marginTop:14,background:'#fff'}}>
               <b style={{fontSize:15,color:T.text,display:'block',marginBottom:12}}>Signature</b>
               <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
@@ -674,12 +737,12 @@
               </div>
               <div style={{display:'flex',gap:8,marginBottom:10}}>
                 {['draw','type'].map(m=>(
-                  <button key={m} onClick={()=>setMode(m)} style={{...btnGhost,background:mode===m?T.blue:T.blueLight,color:mode===m?'#fff':T.blue,padding:'7px 18px',fontSize:13.5}}>
+                  <button key={m} onClick={()=>setSigMode(m)} style={{...btnGhost,background:sigMode===m?T.blue:T.blueLight,color:sigMode===m?'#fff':T.blue,padding:'7px 18px',fontSize:13.5}}>
                     {m==='draw'?'✍ Draw':'⌨ Type'}
                   </button>
                 ))}
               </div>
-              {mode==='draw' ? (
+              {sigMode==='draw' ? (
                 <div style={{marginBottom:12}}>
                   <canvas ref={canvasRef} width={640} height={160} style={{width:'100%',maxWidth:640,height:150,border:`1.5px solid ${T.border}`,borderRadius:10,background:'#fff',touchAction:'none',cursor:'crosshair',display:'block'}}/>
                   <button style={{...btnDanger,marginTop:4}} onClick={clearCanvas}>Clear</button>
@@ -711,6 +774,66 @@
             </div>
           )}
         </SectionCard>
+      );
+    }
+
+    // Signing through DocuSeal: one confirm click prepares every agreement, then the
+    // client is walked through them one after another and lands back here when done.
+    function DocusealSign({session, token, setSession, showToast, ready, unsigned, name, setName, title, setTitle, email, setEmail}) {
+      const [confirmed, setConfirmed] = useState(false);
+      const [busy, setBusy] = useState(false);
+      const started = unsigned.some(e => e.docuseal_pending);
+
+      const start = async () => {
+        if (!name.trim()) return showToast('Enter the full name of the person signing');
+        if (!email.trim()) return showToast("Enter the signer's email");
+        if (!confirmed) return showToast('Please confirm the details above are correct');
+        setBusy(true);
+        try {
+          const res = await api(`/api/sessions/${token}/docuseal/start`, {method:'POST', body:{signer_name:name, signer_title:title, signer_email:email}});
+          if (res.next_url) { window.location.href = res.next_url; return; }
+          setSession(res);
+        } catch (e) { showToast(e.message); setBusy(false); }
+      };
+
+      if (started) return (
+        <div style={{border:`1px solid ${T.border}`,borderRadius:12,padding:'18px',marginTop:4,background:'#fff'}}>
+          <b style={{fontSize:15,color:T.text,display:'block',marginBottom:6}}>Signing in progress</b>
+          <div style={{fontSize:14,color:T.textMid,lineHeight:1.55,marginBottom:14}}>
+            {unsigned.length} agreement{unsigned.length===1?' is':'s are'} waiting for a signature. You'll be taken through them one at a time —
+            after each signature you're automatically moved to the next.
+          </div>
+          <a href={`/api/sessions/${token}/docuseal/next`} style={{...btnPrimary,textDecoration:'none',display:'inline-block',fontSize:16}}>
+            Continue signing ({unsigned.length} left) →
+          </a>
+          <div style={{fontSize:12.5,color:T.textLight,marginTop:10}}>Signed on DocuSeal already? This page updates automatically when you come back.</div>
+        </div>
+      );
+
+      return (
+        <div style={{border:`1px solid ${T.border}`,borderRadius:12,padding:'18px',marginTop:4,background:'#fff'}}>
+          <b style={{fontSize:15,color:T.text,display:'block',marginBottom:4}}>Who is signing?</b>
+          <div style={{fontSize:13.5,color:T.textLight,marginBottom:14}}>Signing happens securely through DocuSeal — you'll sign each agreement in a row, a couple of clicks each, and land right back here.</div>
+          <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+            <Field label="Signer's full name" hint="an individual, not the company" style={{flex:'1 1 200px'}}>
+              <input style={inputStyle} value={name} onChange={e=>setName(e.target.value)} placeholder="Jane Smith"/>
+            </Field>
+            <Field label="Title" hint="optional" style={{flex:'1 1 160px'}}>
+              <input style={inputStyle} value={title} onChange={e=>setTitle(e.target.value)} placeholder="Regional Manager"/>
+            </Field>
+            <Field label="Signer's email" style={{flex:'1 1 220px'}}>
+              <input style={inputStyle} type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="signer@company.com"/>
+            </Field>
+          </div>
+          <label style={{display:'flex',gap:10,alignItems:'flex-start',fontSize:13.5,color:T.textMid,lineHeight:1.5,marginBottom:16,cursor:'pointer',maxWidth:640}}>
+            <input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)} style={{width:17,height:17,accentColor:T.blue,marginTop:2,cursor:'pointer'}}/>
+            <span>I've reviewed the entities, check details, and documents above, they are correct, and I am authorized to enter into agreements on behalf of these entities.</span>
+          </label>
+          <button style={{...btnPrimary,fontSize:16,padding:'13px 30px',opacity:(busy||!ready)?0.55:1,cursor:(busy||!ready)?'not-allowed':'pointer'}} disabled={busy||!ready} onClick={start}>
+            {busy ? 'Preparing your agreements…' : `Confirm & sign ${unsigned.length} agreement${unsigned.length===1?'':'s'} →`}
+          </button>
+          {!ready && <div style={{fontSize:13,color:T.warn,fontWeight:600,marginTop:10}}>Finish the final-check items above to unlock signing.</div>}
+        </div>
       );
     }
 
