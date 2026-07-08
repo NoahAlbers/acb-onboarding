@@ -71,6 +71,9 @@ function serializeSession(session) {
       address: e.address,
       payable_to: e.payable_to,
       check_address: e.check_address,
+      contact_name: e.contact_name,
+      contact_email: e.contact_email,
+      contact_phone: e.contact_phone,
       signer_name: e.signer_name,
       signer_title: e.signer_title,
       signed_at: e.signed_at,
@@ -98,7 +101,7 @@ const SESSION_FIELDS = [
   'company_name', 'contact_name', 'contact_email', 'contact_phone', 'contact_fax',
   'mgmt_type', 'checks_mode', 'corporate_payable_to', 'corporate_check_address',
 ];
-const ENTITY_FIELDS = ['legal_name', 'property_name', 'address', 'payable_to', 'check_address'];
+const ENTITY_FIELDS = ['legal_name', 'property_name', 'address', 'payable_to', 'check_address', 'contact_name', 'contact_email', 'contact_phone'];
 
 function requireSession(req, res, next) {
   const session = getSession(req.params.token);
@@ -212,7 +215,7 @@ app.patch('/api/sessions/:token/entities/:id', requireSession, (req, res) => {
   }
   if (updates.length) {
     // Changing what the agreement says voids an existing signature — it must be re-signed.
-    const material = ['legal_name', 'address'].some(
+    const material = ['legal_name', 'address', 'contact_name', 'contact_email', 'contact_phone'].some(
       (f) => f in req.body && String(req.body[f] ?? '').trim() !== entity[f]
     );
     if (material && (entity.signed_at || entity.docuseal_submission_id)) {
@@ -318,7 +321,7 @@ app.post('/api/sessions/:token/docuseal/start', requireSession, async (req, res)
     }
   } catch (e) {
     console.error('DocuSeal submission creation failed:', e.message);
-    return res.status(502).json({ error: 'Could not reach the e-sign service. Please try again in a moment.' });
+    return res.status(502).json({ error: `E-sign service error: ${e.message}` });
   }
   touch(req.session.id);
   const first = db
@@ -428,6 +431,13 @@ function requireAdmin(req, res, next) {
 app.get('/api/admin/sessions', requireAdmin, (req, res) => {
   const sessions = db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 500').all();
   res.json(sessions.map(serializeSession));
+});
+
+// Visit /api/admin/docuseal-check?key=<ADMIN_KEY> to verify the DocuSeal API key/plan.
+app.get('/api/admin/docuseal-check', requireAdmin, async (req, res) => {
+  if (!docuseal.enabled()) return res.json({ ok: false, error: 'DOCUSEAL_API_KEY is not set — the portal is using built-in signing.' });
+  try { res.json({ ok: true, message: await docuseal.checkConnection() }); }
+  catch (e) { res.json({ ok: false, error: e.message }); }
 });
 
 /* ---------- pages ---------- */

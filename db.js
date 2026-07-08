@@ -65,6 +65,9 @@ for (const col of [
   'docuseal_slug TEXT',
   'signed_doc_url TEXT',
   'signer_email TEXT',
+  "contact_name TEXT NOT NULL DEFAULT ''",
+  "contact_email TEXT NOT NULL DEFAULT ''",
+  "contact_phone TEXT NOT NULL DEFAULT ''",
 ]) {
   try { db.exec(`ALTER TABLE entities ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }
