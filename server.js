@@ -408,7 +408,7 @@ app.get('/api/sessions/:token/entities/:id/agreement.pdf', requireSession, async
   const { bytes } = await buildAgreementPdf(req.session, entity);
   const safe = (entity.legal_name || 'agreement').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="collection-agreement-${safe}.pdf"`);
+  res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="collection-agreement-${safe}.pdf"`);
   res.send(Buffer.from(bytes));
 });
 
@@ -418,7 +418,7 @@ app.get('/api/sessions/:token/agreements.pdf', requireSession, async (req, res) 
   const bytes = await buildAllAgreementsPdf(req.session, entities);
   const safe = (req.session.company_name || 'acb').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="collection-agreements-${safe}.pdf"`);
+  res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="collection-agreements-${safe}.pdf"`);
   res.send(Buffer.from(bytes));
 });
 
@@ -433,6 +433,15 @@ function requireAdmin(req, res, next) {
 app.get('/api/admin/sessions', requireAdmin, (req, res) => {
   const sessions = db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 500').all();
   res.json(sessions.map(serializeSession));
+});
+
+app.delete('/api/admin/sessions/:token', requireAdmin, (req, res) => {
+  const session = getSession(req.params.token);
+  if (!session) return res.status(404).json({ error: 'Onboarding not found' });
+  const files = db.prepare('SELECT stored_name FROM files WHERE session_id = ?').all(session.id);
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id); // entities/files cascade
+  for (const f of files) fs.promises.unlink(path.join(UPLOAD_DIR, f.stored_name)).catch(() => {});
+  res.json({ ok: true });
 });
 
 // Visit /api/admin/docuseal-check?key=<ADMIN_KEY> to verify the DocuSeal API key/plan.

@@ -142,6 +142,7 @@
               <span key={i} style={{background:'#fff',border:`1px solid ${T.border}`,borderRadius:50,padding:'7px 16px',fontSize:13.5,fontWeight:600,color:T.textMid}}>{i+1}. {s}</span>
             ))}
           </div>
+          <a href="/admin" title="ACB staff sign-in" style={{position:'fixed',right:16,bottom:12,fontSize:15,opacity:0.18,color:T.textLight,textDecoration:'none'}}>⚙</a>
           <div style={{...card,padding:'30px 32px'}}>
             <Field label="Management company name"><input style={inputStyle} value={form.company_name} onChange={set('company_name')} placeholder="e.g. Sunrise Property Management"/></Field>
             <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
@@ -282,6 +283,7 @@
             <aside className="sidebar" style={{flex:'0 0 268px',position:'sticky',top:78}}>
               <ShareCard session={session} showToast={showToast}/>
               <StepList session={session}/>
+              <HelpCard/>
             </aside>
           </div>
           {celebrate && <Confetti/>}
@@ -301,6 +303,19 @@
         {label:`Signatures (${p.signed}/${p.total})`, done: p.total > 0 && p.signed === p.total},
       ];
     }
+
+    // Print a same-origin PDF via a hidden iframe; falls back to opening it.
+    const printPdf = (url) => {
+      const frame = document.createElement('iframe');
+      frame.style.cssText = 'position:fixed;width:0;height:0;border:0;visibility:hidden;';
+      frame.src = url;
+      frame.onload = () => {
+        try { frame.contentWindow.focus(); frame.contentWindow.print(); }
+        catch (e) { window.open(url, '_blank'); }
+      };
+      document.body.appendChild(frame);
+      setTimeout(() => frame.remove(), 120000);
+    };
 
     const copyPortalLink = async (showToast) => {
       try { await navigator.clipboard.writeText(window.location.href); }
@@ -346,6 +361,17 @@
         </div>
       );
     }
+
+    const HelpCard = () => (
+      <div style={{...card,padding:'16px 20px',marginTop:14}}>
+        <b style={{fontSize:14.5,color:T.text,display:'block',marginBottom:6}}>Stuck on something?</b>
+        <div style={{fontSize:13,color:T.textMid,lineHeight:1.55}}>
+          We're happy to walk you through it.<br/>
+          📞 <a href="tel:+13216334999" style={{color:T.blue,fontWeight:600,textDecoration:'none'}}>(321) 633-4999</a><br/>
+          ✉️ <a href="mailto:advancedcollectionbureau@gmail.com" style={{color:T.blue,fontWeight:600,textDecoration:'none'}}>Email us</a>
+        </div>
+      </div>
+    );
 
     function StepList({session}) {
       return (
@@ -773,12 +799,21 @@
                 {!e.signed_at && e.sign_url && (
                   <a href={e.sign_url} style={{...btnPrimary,textDecoration:'none',fontSize:13,padding:'8px 16px'}}>Sign now</a>
                 )}
-                <a href={`/api/sessions/${token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'8px 15px'}}>
-                  {e.signed_at ? 'View signed PDF' : 'Preview agreement'}
-                </a>
+                <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                  <a href={`/api/sessions/${token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" title="Open the agreement in a new tab" style={{...btnGhost,textDecoration:'none',fontSize:12.5,padding:'7px 13px'}}>👁 View</a>
+                  <button title="Print this agreement" style={{...btnGhost,fontSize:12.5,padding:'7px 13px'}} onClick={()=>printPdf(`/api/sessions/${token}/entities/${e.id}/agreement.pdf`)}>🖨 Print</button>
+                  <a href={`/api/sessions/${token}/entities/${e.id}/agreement.pdf?download=1`} title="Save as a PDF file" style={{...btnGhost,textDecoration:'none',fontSize:12.5,padding:'7px 13px'}}>⬇ PDF</a>
+                </div>
               </div>
             );
           })}
+
+          {entities.length > 1 && (
+            <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
+              <a href={`/api/sessions/${token}/agreements.pdf?download=1`} style={{...btnGhost,textDecoration:'none',fontSize:12.5,padding:'7px 14px'}}>⬇ Download all {entities.length} as one PDF</a>
+              <button style={{...btnGhost,fontSize:12.5,padding:'7px 14px'}} onClick={()=>printPdf(`/api/sessions/${token}/agreements.pdf`)}>🖨 Print all</button>
+            </div>
+          )}
 
           {entities.length > 0 && !allSigned && <div style={{marginTop:14}}><FinalCheck session={session} draftDirty={draftDirty}/></div>}
 
@@ -834,7 +869,11 @@
                 All {entities.length} agreement{entities.length===1?' is':'s are'} signed. Advanced Collection Bureau will countersign and send back your copies,
                 assign your client number{entities.length===1?'':'s'}, and reach out with next steps for placing accounts.
               </div>
-              <a href={`/api/sessions/${token}/agreements.pdf`} target="_blank" rel="noopener" style={{...btnPrimary,textDecoration:'none',display:'inline-block'}}>⬇ Download all signed agreements (PDF)</a>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+                <a href={`/api/sessions/${token}/agreements.pdf?download=1`} style={{...btnPrimary,textDecoration:'none',display:'inline-block'}}>⬇ Download all signed agreements (PDF)</a>
+                <a href={`/api/sessions/${token}/agreements.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',display:'inline-block'}}>👁 View</a>
+                <button style={btnGhost} onClick={()=>printPdf(`/api/sessions/${token}/agreements.pdf`)}>🖨 Print</button>
+              </div>
             </div>
           )}
         </SectionCard>
@@ -907,7 +946,11 @@
       const [key, setKey] = useState(localStorage.getItem('acb_admin_key') || '');
       const [sessions, setSessions] = useState(null);
       const [err, setErr] = useState('');
+      const [q, setQ] = useState('');
+      const [open, setOpen] = useState({});
+
       const load = async (k) => {
+        if (!k) return setErr('Enter the admin key to sign in.');
         try {
           const data = await api(`/api/admin/sessions?key=${encodeURIComponent(k)}`);
           localStorage.setItem('acb_admin_key', k);
@@ -915,45 +958,100 @@
         } catch (e) { setErr(e.message); setSessions(null); }
       };
       useEffect(() => { if (key) load(key); }, []);
+
+      const del = async (s) => {
+        const label = s.company_name || 'this onboarding';
+        if (!window.confirm(`Delete ${label}?\n\nThis permanently removes its ${s.progress.total} agreement(s), uploaded files, and the client's link. This cannot be undone.`)) return;
+        try {
+          await api(`/api/admin/sessions/${s.token}?key=${encodeURIComponent(key)}`, {method:'DELETE'});
+          setSessions(list => list.filter(x => x.token !== s.token));
+        } catch (e) { alert(e.message); }
+      };
+
+      const filtered = (sessions || []).filter(s => {
+        const hay = `${s.company_name} ${s.contact_name} ${s.contact_email} ${s.entities.map(e=>e.legal_name+' '+e.property_name).join(' ')}`.toLowerCase();
+        return hay.includes(q.trim().toLowerCase());
+      });
+      const completed = (sessions || []).filter(s => s.completed_at).length;
+
+      const fmtWhen = (iso) => new Date(iso).toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'});
+
       return (
-        <div style={{maxWidth:960,margin:'0 auto',padding:'30px 18px 80px'}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12,marginBottom:20}}>
+        <div style={{maxWidth:980,margin:'0 auto',padding:'30px 18px 80px'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:12,marginBottom:8}}>
             <Brand/>
             <div style={{display:'flex',gap:8}}>
               <input style={{...inputStyle,width:220}} type="password" placeholder="Admin key" value={key} onChange={e=>setKey(e.target.value)} onKeyDown={e=>e.key==='Enter'&&load(key)}/>
-              <button style={btnPrimary} onClick={()=>load(key)}>Load</button>
+              <button style={btnPrimary} onClick={()=>load(key)}>{sessions ? 'Refresh' : 'Sign in'}</button>
             </div>
           </div>
           {err && <div style={{color:T.red,fontWeight:600,marginBottom:14}}>{err}</div>}
-          {sessions && !sessions.length && <div style={{color:T.textLight}}>No onboardings yet.</div>}
-          {sessions && sessions.map(s=>(
-            <div key={s.token} style={card}>
-              <div style={{display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',marginBottom:8}}>
-                <div>
-                  <b style={{fontSize:17,color:T.text}}>{s.company_name || '(no company name)'}</b>
-                  <div style={{fontSize:13.5,color:T.textLight}}>{s.contact_name} · {s.contact_email} · {s.contact_phone} · {s.mgmt_type==='third_party'?'Third-Party':s.mgmt_type==='owner_operator'?'Owner Operator':'type not set'}</div>
-                </div>
-                <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
-                  {s.completed_at ? <Chip tone="done">Complete ✓</Chip> : <Chip tone="todo">{s.progress.signed}/{s.progress.total} signed</Chip>}
-                  <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/o/${s.token}`} target="_blank" rel="noopener">Open portal</a>
-                  {s.progress.total > 0 && <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/api/sessions/${s.token}/agreements.pdf`} target="_blank" rel="noopener">All PDFs</a>}
-                </div>
+          {!sessions && !err && <div style={{color:T.textLight,fontSize:14,marginTop:20}}>Enter the admin key to see all client onboardings.</div>}
+
+          {sessions && (
+            <div className="fade-in">
+              <div style={{display:'flex',gap:8,flexWrap:'wrap',alignItems:'center',margin:'12px 0 16px'}}>
+                <Chip tone="info">{sessions.length} total</Chip>
+                <Chip tone="done">{completed} completed</Chip>
+                <Chip tone="todo">{sessions.length - completed} in progress</Chip>
+                <input style={{...inputStyle,flex:'1 1 220px',maxWidth:340,marginLeft:'auto'}} placeholder="🔍 Search company, contact, or entity…" value={q} onChange={e=>setQ(e.target.value)}/>
               </div>
-              {s.entities.map(e=>(
-                <div key={e.id} style={{fontSize:13.5,color:T.textMid,padding:'6px 0',borderTop:`1px solid ${T.border}`,display:'flex',justifyContent:'space-between',gap:8,flexWrap:'wrap'}}>
-                  <span><b style={{color:T.text}}>{e.legal_name}</b>{e.property_name?` · ${e.property_name}`:''} — payable to {e.resolved_payment.payableTo}{e.resolved_payment.address?`, ${e.resolved_payment.address}`:''}</span>
-                  <span>{e.signed_at ? <span style={{color:T.green,fontWeight:700}}>Signed by {e.signer_name} {new Date(e.signed_at).toLocaleDateString()}</span> : <span style={{color:T.warn,fontWeight:700}}>Unsigned</span>}</span>
-                </div>
-              ))}
-              {s.files.length > 0 && (
-                <div style={{fontSize:13,color:T.textLight,marginTop:8}}>
-                  Files: {s.files.map(f=>(
-                    <a key={f.id} href={`/api/sessions/${s.token}/files/${f.id}/download`} style={{color:T.blue,marginRight:10}}>{f.kind==='management_agreement'?'Mgmt agreement':f.kind==='lease'?'Lease':'File'}: {f.original_name}</a>
-                  ))}
-                </div>
-              )}
+              {!filtered.length && <div style={{color:T.textLight,padding:'30px 0',textAlign:'center'}}>{sessions.length ? 'No onboardings match your search.' : 'No onboardings yet — share the landing page with a client to get started.'}</div>}
+
+              {filtered.map(s => {
+                const isOpen = !!open[s.token];
+                return (
+                  <div key={s.token} style={{...card,padding:'16px 20px'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap',cursor:'pointer'}} onClick={()=>setOpen(o=>({...o,[s.token]:!isOpen}))}>
+                      <div style={{minWidth:0}}>
+                        <b style={{fontSize:16,color:T.text}}>{s.company_name || '(no company name)'}</b>
+                        <div style={{fontSize:13,color:T.textLight}}>
+                          {s.contact_name || 'no contact'}{s.contact_email ? ` · ${s.contact_email}` : ''} · {s.mgmt_type==='third_party'?'Third-Party':s.mgmt_type==='owner_operator'?'Owner Operator':'type not set'} · updated {fmtWhen(s.updated_at)}
+                        </div>
+                      </div>
+                      <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                        {s.completed_at ? <Chip tone="done">Complete ✓</Chip> : <Chip tone="todo">{s.progress.signed}/{s.progress.total} signed</Chip>}
+                        <span style={{color:T.textLight,fontSize:13,fontWeight:700}}>{isOpen ? '▲' : '▼'}</span>
+                      </div>
+                    </div>
+
+                    {isOpen && (
+                      <div className="fade-in" style={{marginTop:12,borderTop:`1px solid ${T.border}`,paddingTop:10}}>
+                        {s.entities.map(e=>(
+                          <div key={e.id} style={{fontSize:13.5,color:T.textMid,padding:'7px 0',borderBottom:`1px solid ${T.border}`,display:'flex',justifyContent:'space-between',gap:10,flexWrap:'wrap',alignItems:'center'}}>
+                            <span style={{minWidth:0}}>
+                              <b style={{color:T.text}}>{e.legal_name}</b>{e.property_name?` · ${e.property_name}`:''}
+                              <span style={{color:T.textLight}}> — payable to {e.resolved_payment.payableTo}{e.resolved_payment.address?`, ${e.resolved_payment.address}`:''}</span>
+                              {(e.contact_name||e.contact_email) && <span style={{color:T.textLight}}> · contact: {e.contact_name}{e.contact_email?` (${e.contact_email})`:''}</span>}
+                            </span>
+                            <span style={{display:'flex',gap:8,alignItems:'center',flexShrink:0}}>
+                              {e.signed_at ? <span style={{color:T.green,fontWeight:700,fontSize:12.5}}>Signed {fmtWhen(e.signed_at)} by {e.signer_name}</span> : <span style={{color:T.warn,fontWeight:700,fontSize:12.5}}>Unsigned</span>}
+                              <a href={`/api/sessions/${s.token}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{color:T.blue,fontWeight:600,fontSize:12.5,textDecoration:'none'}}>PDF</a>
+                            </span>
+                          </div>
+                        ))}
+                        {!s.entities.length && <div style={{fontSize:13,color:T.textLight,padding:'6px 0'}}>No entities added yet.</div>}
+                        {s.files.length > 0 && (
+                          <div style={{fontSize:13,color:T.textLight,marginTop:8}}>
+                            Files: {s.files.map(f=>(
+                              <a key={f.id} href={`/api/sessions/${s.token}/files/${f.id}/download`} style={{color:T.blue,marginRight:10}}>{f.kind==='management_agreement'?'Mgmt agreement':f.kind==='lease'?'Lease':'File'}: {f.original_name}</a>
+                            ))}
+                          </div>
+                        )}
+                        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12,alignItems:'center'}}>
+                          <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/o/${s.token}`} target="_blank" rel="noopener">Open portal (view/edit)</a>
+                          {s.progress.total > 0 && <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/api/sessions/${s.token}/agreements.pdf`} target="_blank" rel="noopener">All PDFs</a>}
+                          {s.progress.total > 0 && <a style={{...btnGhost,textDecoration:'none',fontSize:13}} href={`/api/sessions/${s.token}/agreements.pdf?download=1`}>⬇ Download</a>}
+                          <button style={{...btnDanger,color:T.red,marginLeft:'auto',border:`1px solid ${T.border}`,padding:'7px 14px'}} onClick={(ev)=>{ev.stopPropagation();del(s);}}>🗑 Delete onboarding</button>
+                        </div>
+                        <div style={{fontSize:12,color:T.textLight,marginTop:8}}>Started {fmtWhen(s.created_at)} · client link: <a href={`/o/${s.token}`} style={{color:T.blue}}>{window.location.origin}/o/{s.token}</a></div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          )}
         </div>
       );
     }
