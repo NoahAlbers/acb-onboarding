@@ -341,6 +341,7 @@
             <aside className="sidebar" style={{flex:'0 0 268px',position:'sticky',top:78}}>
               <ShareCard session={session} showToast={showToast}/>
               <StepList session={session}/>
+              <AgreementPreviewCard token={token}/>
               <HelpCard/>
             </aside>
           </div>
@@ -416,6 +417,23 @@
             accounting fills in check details, your office manager uploads documents, an authorized signer signs. No logins needed.
           </div>
           <button style={{...btnGhost,width:'100%'}} onClick={()=>copyPortalLink(showToast)}>🔗 Copy link</button>
+        </div>
+      );
+    }
+
+    function AgreementPreviewCard({token}) {
+      return (
+        <div style={{...card,padding:'16px 20px',marginTop:14,marginBottom:0}}>
+          <b style={{fontSize:14.5,color:T.text,display:'block',marginBottom:6}}>Want to read the agreement first?</b>
+          <div style={{fontSize:13,color:T.textMid,lineHeight:1.55,marginBottom:12}}>
+            Take a look at the collection agreement before you fill anything in — it's one page.
+            Prefer pen and paper? Print it, sign it, and email it to{' '}
+            <a href="mailto:nalbers@advancedcb.com" style={{color:T.blue,fontWeight:600,textDecoration:'none'}}>nalbers@advancedcb.com</a> instead.
+          </div>
+          <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+            <a href={`/api/sessions/${token}/agreement-preview.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'8px 15px'}}>👁 View agreement</a>
+            <button style={{...btnGhost,fontSize:13,padding:'8px 15px'}} onClick={()=>printPdf(`/api/sessions/${token}/agreement-preview.pdf`)}>🖨 Print</button>
+          </div>
         </div>
       );
     }
@@ -1127,6 +1145,7 @@
 
                 <div style={{flex:'1 1 300px'}}>
                   <div style={{fontSize:12,color:T.textLight,fontWeight:700,textTransform:'uppercase',letterSpacing:0.4,marginBottom:6}}>Emails to clients</div>
+                  <SettingToggle label="Email new clients their portal link" desc="The moment someone starts an onboarding, they get their private link by email so it's never lost." value={cfg.settings.send_welcome_email} onChange={v=>set('send_welcome_email', v)}/>
                   <SettingToggle label="Send clients their signed copies" desc="When everything is signed, the client gets a branded email with the PDFs attached." value={cfg.settings.send_client_copy} onChange={v=>set('send_client_copy', v)}/>
                   <div style={{fontSize:12,color:T.textLight,fontWeight:700,textTransform:'uppercase',letterSpacing:0.4,margin:'12px 0 2px'}}>Automatic reminders</div>
                   <SettingToggle label="Remind clients about unfinished onboardings" desc="A friendly checklist email showing exactly what's left, with their portal link." value={cfg.settings.reminders_enabled} onChange={v=>set('reminders_enabled', v)}/>
@@ -1146,6 +1165,7 @@
                 <span style={{fontSize:12.5,color:T.textLight,fontWeight:600}}>Preview in your inbox:</span>
                 <select value={template} onChange={e=>setTemplate(e.target.value)} style={{...inputStyle,width:'auto',padding:'8px 10px',fontSize:13.5,cursor:'pointer'}}>
                   <option value="test">Plain test email</option>
+                  <option value="welcome">Client welcome + portal link (sample)</option>
                   <option value="reminder">Client reminder (sample)</option>
                   <option value="client_copy">Client signed copies (sample)</option>
                   <option value="completion">ACB: onboarding complete (sample)</option>

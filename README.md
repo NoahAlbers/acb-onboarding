@@ -103,6 +103,8 @@ Everything is controlled from **/admin → Email settings** (stored in the DB, n
   and/or the client's uploaded documents (capped at 15 MB).
 - **Client copies** — when everything is signed, the client automatically gets a branded
   email with their signed PDFs attached and what-happens-next steps.
+- **Welcome email** — the moment someone starts an onboarding, they get their private
+  portal link by email (button + copyable link), so it's never lost and easy to forward.
 - **Automatic reminders** — incomplete onboardings that go quiet get a friendly checklist
   email (green checks for what's done, amber for what's left) with their portal link.
   Configurable: first nudge after N idle days, repeat every M days, stop after K total.

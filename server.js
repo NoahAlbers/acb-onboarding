@@ -45,6 +45,7 @@ const SETTINGS_DEFAULTS = {
   attach_signed_agreements: true,  // attach the combined signed-agreements PDF to ACB notifications
   attach_uploaded_docs: false,     // also attach the client's lease / management agreement
   send_client_copy: true,          // email the client their signed copies on completion
+  send_welcome_email: true,        // email new clients their portal link when they start
   reminders_enabled: true,
   reminder_after_days: 3,          // idle days before the first nudge
   reminder_every_days: 4,          // days between nudges
@@ -306,7 +307,15 @@ app.post('/api/sessions', (req, res) => {
   ).run(token, String(b.company_name || '').trim(), String(b.contact_name || '').trim(),
         String(b.contact_email || '').trim(), String(b.contact_phone || '').trim(),
         String(b.mgmt_type || ''), now(), now());
-  res.json(serializeSession(getSession(token)));
+  const session = getSession(token);
+  // Fire-and-forget: the client shouldn't wait on SMTP to reach their portal.
+  const email = String(b.contact_email || '').trim();
+  if (email && NOTIFY_ENABLED && mailer.enabled() && getSettings().send_welcome_email) {
+    const url = `${process.env.BASE_URL || `${req.protocol}://${req.get('host')}`}/o/${token}`;
+    mailer.send({ to: email, ...emails.welcomeEmail(serializeSession(session), url) })
+      .catch((e) => console.error('Welcome email failed:', e.message));
+  }
+  res.json(serializeSession(session));
 });
 
 app.get('/api/sessions/:token', requireSession, (req, res) => {
@@ -566,6 +575,16 @@ app.get('/api/sessions/:token/entities/:id/agreement.pdf', requireSession, async
   const safe = (entity.legal_name || 'agreement').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
   res.setHeader('Content-Type', 'application/pdf');
   res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="collection-agreement-${safe}.pdf"`);
+  res.send(Buffer.from(bytes));
+});
+
+// A read-only look at the agreement they'll be signing — company info filled in,
+// creditor lines blank — so clients can review or print-and-sign on paper.
+app.get('/api/sessions/:token/agreement-preview.pdf', requireSession, async (req, res) => {
+  const blank = { legal_name: '', property_name: '', address: '', payable_to: '', check_address: '' };
+  const { bytes } = await buildAgreementPdf(req.session, blank);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="acb-collection-agreement.pdf"`);
   res.send(Buffer.from(bytes));
 });
 
