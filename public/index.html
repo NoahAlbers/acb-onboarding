@@ -1060,6 +1060,7 @@
       const [dirty, setDirty] = useState(false);
       const [busy, setBusy] = useState(false);
       const [testTo, setTestTo] = useState('');
+      const [template, setTemplate] = useState('test');
       const [note, setNote] = useState(null);    // {ok, text}
 
       useEffect(() => {
@@ -1076,7 +1077,7 @@
       };
       const sendTest = async () => {
         setBusy(true);
-        try { await api(`/api/admin/test-email?key=${encodeURIComponent(adminKey)}`, {method:'POST', body:{to:testTo}}); setNote({ok:true, text:`Test email sent to ${testTo} — check the inbox (and spam folder).`}); }
+        try { await api(`/api/admin/test-email?key=${encodeURIComponent(adminKey)}`, {method:'POST', body:{to:testTo, template}}); setNote({ok:true, text:`Sent to ${testTo} — check the inbox (and spam folder). Samples use fake "Sunrise Property Management" data.`}); }
         catch (e) { setNote({ok:false, text:e.message}); }
         setBusy(false);
       };
@@ -1142,8 +1143,16 @@
               <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center',marginTop:14,borderTop:`1px solid ${T.border}`,paddingTop:14}}>
                 <button style={{...btnPrimary,padding:'10px 24px',opacity:(busy||!dirty)?0.55:1}} disabled={busy||!dirty} onClick={save}>{dirty ? 'Save settings' : 'Saved ✓'}</button>
                 <span style={{flex:1}}/>
-                <input style={{...inputStyle,width:230,padding:'8px 12px'}} placeholder="you@advancedcb.com" value={testTo} onChange={e=>setTestTo(e.target.value)}/>
-                <button style={{...btnGhost,opacity:busy?0.55:1}} disabled={busy} onClick={sendTest}>Send test email</button>
+                <span style={{fontSize:12.5,color:T.textLight,fontWeight:600}}>Preview in your inbox:</span>
+                <select value={template} onChange={e=>setTemplate(e.target.value)} style={{...inputStyle,width:'auto',padding:'8px 10px',fontSize:13.5,cursor:'pointer'}}>
+                  <option value="test">Plain test email</option>
+                  <option value="reminder">Client reminder (sample)</option>
+                  <option value="client_copy">Client signed copies (sample)</option>
+                  <option value="completion">ACB: onboarding complete (sample)</option>
+                  <option value="signature">ACB: signature update (sample)</option>
+                </select>
+                <input style={{...inputStyle,width:210,padding:'8px 12px'}} placeholder="you@advancedcb.com" value={testTo} onChange={e=>setTestTo(e.target.value)}/>
+                <button style={{...btnGhost,opacity:busy?0.55:1}} disabled={busy} onClick={sendTest}>Send it to me</button>
               </div>
               {note && <div style={{fontSize:13,fontWeight:600,color:note.ok?T.green:T.red,marginTop:10}}>{note.text}</div>}
             </div>
@@ -1352,14 +1361,14 @@
                           <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:12,background:'#FAFBFD',border:`1px solid ${T.border}`,borderRadius:10,padding:'9px 13px'}}>
                             <span style={{fontSize:13,color:T.textMid}}>
                               <b style={{color:T.text}}>Reminders:</b>{' '}
-                              {s.reminders_muted ? 'muted for this client'
+                              {s.reminders_muted ? 'auto-reminders muted (you can still send manually)'
                                 : s.reminder_count ? `${s.reminder_count} sent${s.last_reminder_at ? `, last ${fmtWhen(s.last_reminder_at)}` : ''}`
                                 : 'none sent yet'}
                               {!s.contact_email && <span style={{color:T.warn,fontWeight:700}}> · no contact email</span>}
                             </span>
                             <span style={{flex:1}}/>
-                            {s.contact_email && !s.reminders_muted && <button style={{...btnGhost,fontSize:12.5,padding:'6px 13px'}} onClick={(ev)=>{ev.stopPropagation();remind(s);}}>📨 Send reminder now</button>}
-                            <button style={{...btnDanger,border:`1px solid ${T.border}`,padding:'6px 13px',fontSize:12.5}} onClick={(ev)=>{ev.stopPropagation();muteToggle(s);}}>{s.reminders_muted ? '🔔 Unmute' : '🔕 Mute reminders'}</button>
+                            {s.contact_email && <button style={{...btnGhost,fontSize:12.5,padding:'6px 13px'}} onClick={(ev)=>{ev.stopPropagation();remind(s);}}>📨 Send reminder now</button>}
+                            <button style={{...btnDanger,border:`1px solid ${T.border}`,padding:'6px 13px',fontSize:12.5}} onClick={(ev)=>{ev.stopPropagation();muteToggle(s);}}>{s.reminders_muted ? '🔔 Resume auto-reminders' : '🔕 Mute auto-reminders'}</button>
                           </div>
                         )}
                         <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:12,alignItems:'center'}}>

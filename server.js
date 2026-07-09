@@ -655,14 +655,18 @@ app.put('/api/admin/settings', requireAdmin, (req, res) => {
   res.json({ settings: saveSettings(req.body), mail: mailer.status() });
 });
 
+// Send a test or a filled-in sample of any client/ACB template, so admins can
+// see exactly what each email looks like in a real inbox.
 app.post('/api/admin/test-email', requireAdmin, async (req, res) => {
   const to = String((req.body || {}).to || '').trim();
+  const template = String((req.body || {}).template || 'test');
   if (!to) return res.status(400).json({ error: 'Enter an email address to send the test to.' });
   const check = await mailer.verify();
   if (!check.ok) return res.status(400).json({ error: check.error });
   try {
-    await mailer.send({ to, ...emails.testEmail() });
-    res.json({ ok: true, message: check.message || `Test email sent to ${to}` });
+    const sampleUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    await mailer.send({ to, ...emails.previewEmail(template, sampleUrl) });
+    res.json({ ok: true, message: check.message || `Sent to ${to}` });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
