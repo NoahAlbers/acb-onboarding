@@ -86,8 +86,32 @@ npm start          # http://localhost:3000
 | `DOCUSEAL_SIGN_URL` | `https://docuseal.com/s` | Base for signing links |
 | `DOCUSEAL_WEBHOOK_KEY` | — | If set, `/api/docuseal/webhook` requires `?key=` to match |
 | `ACB_SIGNER_EMAIL` | — | Adds an ACB countersign role to each document |
-| `FORMSUBMIT_ID` | (acb-form's ID) | FormSubmit endpoint for completion emails |
-| `NOTIFY_ENABLED` | `true` | Set `false` to disable completion emails |
+| `SMTP_HOST` | — | SMTP server; setting it turns on real email (notifications, client copies, reminders) |
+| `SMTP_PORT` | `587` | `465` switches to implicit TLS |
+| `SMTP_USER` / `SMTP_PASS` | — | SMTP credentials |
+| `MAIL_FROM` | `"Advanced Collection Bureau" <SMTP_USER>` | From header |
+| `MAIL_DEBUG` | — | `true` (with no SMTP_HOST) logs emails instead of sending — for local testing |
+| `FORMSUBMIT_ID` | (acb-form's ID) | FormSubmit fallback for completion notices when SMTP isn't configured |
+| `NOTIFY_ENABLED` | `true` | Set `false` to disable all outbound notifications |
+
+## Email management
+
+Everything is controlled from **/admin → Email settings** (stored in the DB, no restart needed):
+
+- **Notifications to ACB** — which addresses get emailed when an onboarding is fully
+  signed, and optionally on every partial signature. Attach the signed-agreements PDF
+  and/or the client's uploaded documents (capped at 15 MB).
+- **Client copies** — when everything is signed, the client automatically gets a branded
+  email with their signed PDFs attached and what-happens-next steps.
+- **Automatic reminders** — incomplete onboardings that go quiet get a friendly checklist
+  email (green checks for what's done, amber for what's left) with their portal link.
+  Configurable: first nudge after N idle days, repeat every M days, stop after K total.
+  Per-client "send reminder now" and mute controls live on each onboarding row in /admin.
+
+Emails require SMTP (see env vars above) — any provider works: Google Workspace
+(app password), Microsoft 365, or a transactional service like Resend/Postmark/SES
+(their SMTP endpoints). Without SMTP, completion notices fall back to FormSubmit and
+reminders stay off. Use the **Send test email** button in /admin to verify the setup.
 
 ## Pages
 

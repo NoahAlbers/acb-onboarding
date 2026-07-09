@@ -6,6 +6,8 @@ const fs = require('fs');
 const { db, UPLOAD_DIR, DATA_DIR } = require('./db');
 const { buildAgreementPdf, buildAllAgreementsPdf, resolvePayment } = require('./lib/agreement-pdf');
 const docuseal = require('./lib/docuseal');
+const mailer = require('./lib/mailer');
+const emails = require('./lib/emails');
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || '!GreatCollectors123?';
@@ -33,6 +35,40 @@ const upload = multer({
     else cb(new Error('Unsupported file type. Please upload a PDF, Word document, or image.'));
   },
 });
+
+/* ---------- settings ---------- */
+
+const SETTINGS_DEFAULTS = {
+  notify_emails: '',               // who at ACB hears about signatures/completions (comma-separated)
+  notify_on_completion: true,      // email when every agreement on an onboarding is signed
+  notify_on_signature: false,      // email on each partial signature too
+  attach_signed_agreements: true,  // attach the combined signed-agreements PDF to ACB notifications
+  attach_uploaded_docs: false,     // also attach the client's lease / management agreement
+  send_client_copy: true,          // email the client their signed copies on completion
+  reminders_enabled: true,
+  reminder_after_days: 3,          // idle days before the first nudge
+  reminder_every_days: 4,          // days between nudges
+  reminder_max: 3,                 // stop after this many
+};
+
+function getSettings() {
+  const stored = {};
+  for (const row of db.prepare('SELECT key, value FROM settings').all()) {
+    try { stored[row.key] = JSON.parse(row.value); } catch (e) { /* skip corrupt value */ }
+  }
+  return { ...SETTINGS_DEFAULTS, ...stored };
+}
+
+function saveSettings(patch) {
+  const up = db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  for (const [key, value] of Object.entries(patch || {})) {
+    if (!(key in SETTINGS_DEFAULTS)) continue;
+    const kind = typeof SETTINGS_DEFAULTS[key];
+    const cast = kind === 'boolean' ? !!value : kind === 'number' ? Math.max(0, Number(value) || 0) : String(value ?? '').trim();
+    up.run(key, JSON.stringify(cast));
+  }
+  return getSettings();
+}
 
 /* ---------- helpers ---------- */
 
@@ -65,6 +101,9 @@ function serializeSession(session) {
     completed_at: session.completed_at,
     created_at: session.created_at,
     updated_at: session.updated_at,
+    reminder_count: session.reminder_count || 0,
+    last_reminder_at: session.last_reminder_at,
+    reminders_muted: !!session.reminders_muted,
     entities: entities.map((e) => ({
       id: e.id,
       legal_name: e.legal_name,
@@ -112,17 +151,32 @@ function requireSession(req, res, next) {
   next();
 }
 
-async function maybeNotifyCompleted(session) {
-  const fresh = getSession(session.token);
-  const entities = db.prepare('SELECT * FROM entities WHERE session_id = ?').all(fresh.id);
-  const allSigned = entities.length > 0 && entities.every((e) => e.signed_at);
-  if (!allSigned) return;
-  if (!fresh.completed_at) {
-    db.prepare('UPDATE sessions SET completed_at = ?, updated_at = ? WHERE id = ?').run(now(), now(), fresh.id);
+const portalUrlFor = (session) => `${process.env.BASE_URL || ''}/o/${session.token}`;
+
+// Attachments for ACB notification emails, per the admin's settings.
+// Total is capped so the email doesn't bounce at the mail server.
+async function buildNotifyAttachments(sessionRow, settings) {
+  const attachments = [];
+  const entities = db.prepare("SELECT * FROM entities WHERE session_id = ? AND legal_name != '' ORDER BY id").all(sessionRow.id);
+  if (settings.attach_signed_agreements && entities.length) {
+    const bytes = await buildAllAgreementsPdf(sessionRow, entities);
+    const safe = (sessionRow.company_name || 'client').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    attachments.push({ filename: `collection-agreements-${safe}.pdf`, content: Buffer.from(bytes) });
   }
-  if (fresh.notified_at || !NOTIFY_ENABLED) return;
-  db.prepare('UPDATE sessions SET notified_at = ? WHERE id = ?').run(now(), fresh.id);
-  const files = db.prepare('SELECT * FROM files WHERE session_id = ?').all(fresh.id);
+  if (settings.attach_uploaded_docs) {
+    let budget = 15 * 1024 * 1024;
+    for (const f of db.prepare('SELECT * FROM files WHERE session_id = ? ORDER BY id').all(sessionRow.id)) {
+      if (f.size > budget) continue;
+      budget -= f.size;
+      attachments.push({ filename: f.original_name, path: path.join(UPLOAD_DIR, f.stored_name) });
+    }
+  }
+  return attachments;
+}
+
+// Legacy path: with no SMTP configured, completions still reach ACB via FormSubmit
+// (the same endpoint acb-form uses).
+async function formsubmitFallback(fresh, entities, files) {
   const summary = entities
     .map((e) => {
       const pay = resolvePayment(fresh, e);
@@ -136,19 +190,110 @@ async function maybeNotifyCompleted(session) {
     type: fresh.mgmt_type === 'third_party' ? 'Third-Party Management' : 'Owner Operator',
     agreements: summary,
     documents: files.map((f) => `${f.kind}: ${f.original_name}`).join(', ') || 'none uploaded',
-    portal_link: `${process.env.BASE_URL || ''}/o/${fresh.token}`,
+    portal_link: portalUrlFor(fresh),
     _template: 'box',
   };
-  try {
-    await fetch(`https://formsubmit.co/ajax/${FORMSUBMIT_ID}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch (e) {
-    console.error('Completion notification failed:', e.message);
+  await fetch(`https://formsubmit.co/ajax/${FORMSUBMIT_ID}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+async function maybeNotifyCompleted(session) {
+  const fresh = getSession(session.token);
+  const entities = db.prepare('SELECT * FROM entities WHERE session_id = ?').all(fresh.id);
+  const allSigned = entities.length > 0 && entities.every((e) => e.signed_at);
+  if (!allSigned) return;
+  if (!fresh.completed_at) {
+    db.prepare('UPDATE sessions SET completed_at = ?, updated_at = ? WHERE id = ?').run(now(), now(), fresh.id);
+  }
+  if (fresh.notified_at || !NOTIFY_ENABLED) return;
+  db.prepare('UPDATE sessions SET notified_at = ? WHERE id = ?').run(now(), fresh.id);
+
+  const settings = getSettings();
+  const data = serializeSession(getSession(session.token));
+  const portalUrl = portalUrlFor(fresh);
+  const files = db.prepare('SELECT * FROM files WHERE session_id = ?').all(fresh.id);
+
+  // Tell ACB.
+  if (settings.notify_on_completion) {
+    if (mailer.enabled() && settings.notify_emails.trim()) {
+      try {
+        const msg = emails.completionEmailAcb(data, portalUrl);
+        await mailer.send({ to: settings.notify_emails, ...msg, attachments: await buildNotifyAttachments(fresh, settings) });
+      } catch (e) {
+        console.error('Completion email failed:', e.message);
+      }
+    } else {
+      try { await formsubmitFallback(fresh, entities, files); }
+      catch (e) { console.error('Completion notification failed:', e.message); }
+    }
+  }
+
+  // Send the client their signed copies.
+  if (settings.send_client_copy && mailer.enabled() && fresh.contact_email) {
+    try {
+      const signed = entities.filter((e) => e.legal_name);
+      const bytes = await buildAllAgreementsPdf(fresh, signed);
+      const msg = emails.clientCopyEmail(data, portalUrl);
+      await mailer.send({
+        to: fresh.contact_email,
+        ...msg,
+        attachments: [{ filename: 'signed-collection-agreements.pdf', content: Buffer.from(bytes) }],
+      });
+    } catch (e) {
+      console.error('Client copy email failed:', e.message);
+    }
   }
 }
+
+// A signature came in but the onboarding isn't finished — optional heads-up to ACB.
+async function notifySignatures(session, signedIds) {
+  if (!signedIds.length || !NOTIFY_ENABLED) return;
+  const settings = getSettings();
+  if (!settings.notify_on_signature || !mailer.enabled() || !settings.notify_emails.trim()) return;
+  const data = serializeSession(getSession(session.token));
+  if (data.progress.total > 0 && data.progress.signed === data.progress.total) return; // completion email covers this
+  const signedNow = data.entities.filter((e) => signedIds.includes(e.id) && e.signed_at);
+  if (!signedNow.length) return;
+  try {
+    const msg = emails.signatureEmailAcb(data, signedNow, portalUrlFor(session));
+    await mailer.send({ to: settings.notify_emails, ...msg });
+  } catch (e) {
+    console.error('Signature notification failed:', e.message);
+  }
+}
+
+/* ---------- reminder emails ---------- */
+
+async function sendReminder(sessionRow) {
+  const data = serializeSession(sessionRow);
+  const msg = emails.reminderEmail(data, portalUrlFor(sessionRow));
+  await mailer.send({ to: sessionRow.contact_email, ...msg });
+  db.prepare('UPDATE sessions SET reminder_count = reminder_count + 1, last_reminder_at = ? WHERE id = ?').run(now(), sessionRow.id);
+}
+
+// Hourly: nudge incomplete onboardings that have gone quiet. First nudge after
+// reminder_after_days idle, then every reminder_every_days, stopping at reminder_max.
+async function runReminderSweep() {
+  const settings = getSettings();
+  if (!settings.reminders_enabled || !mailer.enabled()) return;
+  const idleBefore = Date.now() - settings.reminder_after_days * 86400000;
+  const repeatBefore = Date.now() - settings.reminder_every_days * 86400000;
+  const candidates = db.prepare(
+    "SELECT * FROM sessions WHERE completed_at IS NULL AND reminders_muted = 0 AND contact_email != '' AND reminder_count < ?"
+  ).all(settings.reminder_max);
+  for (const s of candidates) {
+    if (new Date(s.updated_at).getTime() > idleBefore) continue;
+    if (s.last_reminder_at && new Date(s.last_reminder_at).getTime() > repeatBefore) continue;
+    try { await sendReminder(s); }
+    catch (e) { console.error(`Reminder failed for ${s.token}:`, e.message); }
+  }
+}
+
+setInterval(() => runReminderSweep().catch((e) => console.error('Reminder sweep failed:', e.message)), 60 * 60 * 1000);
+setTimeout(() => runReminderSweep().catch((e) => console.error('Reminder sweep failed:', e.message)), 30 * 1000);
 
 /* ---------- session API ---------- */
 
@@ -261,6 +406,7 @@ app.post('/api/sessions/:token/sign', requireSession, async (req, res) => {
     signed += update.run(name, String(signer_title || '').trim(), signature, stamp, ip, id, req.session.id).changes;
   }
   touch(req.session.id);
+  await notifySignatures(req.session, ids);
   await maybeNotifyCompleted(req.session);
   res.json({ signed, ...serializeSession(getSession(req.params.token)) });
 });
@@ -282,15 +428,20 @@ async function refreshDocusealStatuses(session) {
   const pending = db
     .prepare('SELECT * FROM entities WHERE session_id = ? AND docuseal_submission_id IS NOT NULL AND signed_at IS NULL')
     .all(session.id);
+  const newlySigned = [];
   for (const entity of pending) {
     try {
       const status = await docuseal.getSubmissionStatus(entity.docuseal_submission_id);
-      if (status.completed) markEntitySigned(session.id, entity.id, status);
+      if (status.completed) { markEntitySigned(session.id, entity.id, status); newlySigned.push(entity.id); }
     } catch (e) {
       console.error(`DocuSeal status refresh failed for entity ${entity.id}:`, e.message);
     }
   }
-  if (pending.length) { touch(session.id); await maybeNotifyCompleted(session); }
+  if (pending.length) {
+    touch(session.id);
+    if (newlySigned.length) await notifySignatures(session, newlySigned);
+    await maybeNotifyCompleted(session);
+  }
 }
 
 // Create submissions for all (or selected) unsigned entities and hand back the first signing link.
@@ -492,6 +643,49 @@ app.delete('/api/admin/sessions/:token', requireAdmin, (req, res) => {
   if (!session) return res.status(404).json({ error: 'Onboarding not found' });
   deleteSessionRow(session);
   res.json({ ok: true });
+});
+
+/* ---- email management ---- */
+
+app.get('/api/admin/settings', requireAdmin, (req, res) => {
+  res.json({ settings: getSettings(), mail: mailer.status() });
+});
+
+app.put('/api/admin/settings', requireAdmin, (req, res) => {
+  res.json({ settings: saveSettings(req.body), mail: mailer.status() });
+});
+
+app.post('/api/admin/test-email', requireAdmin, async (req, res) => {
+  const to = String((req.body || {}).to || '').trim();
+  if (!to) return res.status(400).json({ error: 'Enter an email address to send the test to.' });
+  const check = await mailer.verify();
+  if (!check.ok) return res.status(400).json({ error: check.error });
+  try {
+    await mailer.send({ to, ...emails.testEmail() });
+    res.json({ ok: true, message: check.message || `Test email sent to ${to}` });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/sessions/:token/remind', requireAdmin, async (req, res) => {
+  const session = getSession(req.params.token);
+  if (!session) return res.status(404).json({ error: 'Onboarding not found' });
+  if (session.completed_at) return res.status(400).json({ error: 'This onboarding is already complete — nothing to remind about.' });
+  if (!session.contact_email) return res.status(400).json({ error: 'This onboarding has no contact email.' });
+  try {
+    await sendReminder(session);
+    res.json(serializeSession(getSession(req.params.token)));
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/admin/sessions/:token/mute-reminders', requireAdmin, (req, res) => {
+  const session = getSession(req.params.token);
+  if (!session) return res.status(404).json({ error: 'Onboarding not found' });
+  db.prepare('UPDATE sessions SET reminders_muted = ? WHERE id = ?').run(req.body && req.body.muted ? 1 : 0, session.id);
+  res.json(serializeSession(getSession(req.params.token)));
 });
 
 // Visit /api/admin/docuseal-check?key=<ADMIN_KEY> to verify the DocuSeal API key/plan.
