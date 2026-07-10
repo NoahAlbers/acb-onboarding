@@ -109,7 +109,7 @@ function getSession(token) {
   return db.prepare('SELECT * FROM sessions WHERE token = ?').get(token);
 }
 
-function serializeSession(session) {
+function serializeSession(session, opts = {}) {
   const entities = db.prepare('SELECT * FROM entities WHERE session_id = ? ORDER BY id').all(session.id);
   const files = db
     .prepare('SELECT id, kind, original_name, size, mime, uploaded_at FROM files WHERE session_id = ? ORDER BY id')
@@ -137,6 +137,8 @@ function serializeSession(session) {
     reminder_count: session.reminder_count || 0,
     last_reminder_at: session.last_reminder_at,
     reminders_muted: !!session.reminders_muted,
+    // Internal review notes never go to the client-facing portal.
+    ...(opts.admin ? { review: parseReviewNotes(session), review_token: session.review_token, review_updated_at: session.review_updated_at } : {}),
     entities: entities.map((e) => ({
       id: e.id,
       legal_name: e.legal_name,
@@ -164,6 +166,31 @@ function serializeSession(session) {
       has_management_agreement: hasMgmt,
       needs_management_agreement: needsMgmtAgreement,
     },
+  };
+}
+
+function parseReviewNotes(session) {
+  try { return JSON.parse(session.review_notes || '{}'); } catch (e) { return {}; }
+}
+
+// What the company owner sees at /r/<review_token>: read-only, no client PII beyond
+// what's on the agreements, plus ACB's research notes.
+function serializeReview(session) {
+  const s = serializeSession(session);
+  return {
+    company_name: s.company_name,
+    contact_name: s.contact_name,
+    mgmt_type: s.mgmt_type,
+    completed_at: s.completed_at,
+    review: parseReviewNotes(session),
+    review_updated_at: session.review_updated_at,
+    entities: s.entities.map((e) => ({
+      id: e.id, legal_name: e.legal_name, property_name: e.property_name, address: e.address,
+      signed_at: e.signed_at, signer_name: e.signer_name, signer_title: e.signer_title,
+      resolved_payment: e.resolved_payment,
+    })),
+    files: s.files,
+    progress: s.progress,
   };
 }
 
@@ -634,6 +661,50 @@ app.get('/api/sessions/:token/agreements.pdf', requireSession, async (req, res) 
   res.send(Buffer.from(bytes));
 });
 
+/* ---------- owner review (read-only, separate token) ---------- */
+
+function requireReview(req, res, next) {
+  const session = db.prepare('SELECT * FROM sessions WHERE review_token = ?').get(req.params.rtoken);
+  if (!session) return res.status(404).json({ error: 'This review link was not found or has been removed.' });
+  req.session = session;
+  next();
+}
+
+app.get('/api/review/:rtoken', requireReview, (req, res) => {
+  res.json(serializeReview(req.session));
+});
+
+app.get('/api/review/:rtoken/agreements.pdf', requireReview, async (req, res) => {
+  const entities = db.prepare("SELECT * FROM entities WHERE session_id = ? AND legal_name != '' ORDER BY id").all(req.session.id);
+  if (!entities.length) return res.status(404).json({ error: 'No agreements yet' });
+  const bytes = await buildAllAgreementsPdf(req.session, entities);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `${req.query.download ? 'attachment' : 'inline'}; filename="collection-agreements.pdf"`);
+  res.send(Buffer.from(bytes));
+});
+
+app.get('/api/review/:rtoken/entities/:id/agreement.pdf', requireReview, async (req, res) => {
+  const entity = db.prepare('SELECT * FROM entities WHERE id = ? AND session_id = ?').get(req.params.id, req.session.id);
+  if (!entity) return res.status(404).json({ error: 'Entity not found' });
+  if (entity.signed_doc_url) return res.redirect(entity.signed_doc_url);
+  const { bytes } = await buildAgreementPdf(req.session, entity);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'inline; filename="collection-agreement.pdf"');
+  res.send(Buffer.from(bytes));
+});
+
+app.get('/api/review/:rtoken/files/:id/download', requireReview, (req, res) => {
+  const file = db.prepare('SELECT * FROM files WHERE id = ? AND session_id = ?').get(req.params.id, req.session.id);
+  if (!file) return res.status(404).json({ error: 'File not found' });
+  const full = path.join(UPLOAD_DIR, file.stored_name);
+  if (req.query.inline) {
+    res.setHeader('Content-Type', file.mime || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `inline; filename="${file.original_name.replace(/["\\]/g, '')}"`);
+    return res.sendFile(full);
+  }
+  res.download(full, file.original_name);
+});
+
 /* ---------- admin ---------- */
 
 function requireAdmin(req, res, next) {
@@ -655,7 +726,20 @@ function requireAdmin(req, res, next) {
 
 app.get('/api/admin/sessions', requireAdmin, (req, res) => {
   const sessions = db.prepare('SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 500').all();
-  res.json(sessions.map(serializeSession));
+  res.json(sessions.map((s) => serializeSession(s, { admin: true })));
+});
+
+// Save ACB's research notes and mint the owner's read-only review link.
+const REVIEW_FIELDS = ['units', 'rent_min', 'rent_max', 'rent_avg', 'notes'];
+app.put('/api/admin/sessions/:token/review', requireAdmin, (req, res) => {
+  const session = getSession(req.params.token);
+  if (!session) return res.status(404).json({ error: 'Onboarding not found' });
+  const clean = {};
+  for (const f of REVIEW_FIELDS) clean[f] = String((req.body || {})[f] ?? '').trim().slice(0, 4000);
+  const token = session.review_token || `rv${newToken()}`;
+  db.prepare('UPDATE sessions SET review_notes = ?, review_token = ?, review_updated_at = ? WHERE id = ?')
+    .run(JSON.stringify(clean), token, now(), session.id);
+  res.json(serializeSession(getSession(req.params.token), { admin: true }));
 });
 
 // Storage overview: what the app is using, and how full the disk is.
@@ -768,7 +852,7 @@ app.get('/api/admin/docuseal-check', requireAdmin, async (req, res) => {
 /* ---------- pages ---------- */
 
 const INDEX = path.join(__dirname, 'public', 'index.html');
-app.get(['/', '/o/:token', '/admin'], (req, res) => res.sendFile(INDEX));
+app.get(['/', '/o/:token', '/r/:rtoken', '/admin'], (req, res) => res.sendFile(INDEX));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.listen(PORT, () => {

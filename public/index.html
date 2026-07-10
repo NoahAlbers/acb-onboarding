@@ -222,7 +222,6 @@
       // Draft entity inputs live here (not in the section) so the final check can warn
       // about typed-but-never-added entities before signing.
       const [entityDraft, setEntityDraft] = useState({legal_name:'',property_name:'',address:''});
-      const [bulkDraft, setBulkDraft] = useState('');
       const load = useCallback(async () => {
         try {
           let s = await api(`/api/sessions/${token}`);
@@ -294,7 +293,7 @@
       );
       if (!session) return <div style={{textAlign:'center',padding:100,color:T.textLight,fontWeight:600}}>Loading…</div>;
 
-      const draftDirty = Object.values(entityDraft).some(v=>String(v).trim()) || bulkDraft.trim() !== '';
+      const draftDirty = Object.values(entityDraft).some(v=>String(v).trim());
 
       // Flag sections the client moved past while leaving them incomplete —
       // a section only gets the amber cue once a LATER section shows activity.
@@ -327,7 +326,7 @@
             <div style={{flex:'1 1 620px',minWidth:0}}>
               <CompanySection session={session} patchSession={patchSession} attention={attention[0]}/>
               <EntitiesSection session={session} addEntities={addEntities} patchEntity={patchEntity} removeEntity={removeEntity} showToast={showToast}
-                               draft={entityDraft} setDraft={setEntityDraft} bulkText={bulkDraft} setBulkText={setBulkDraft} attention={attention[1]}/>
+                               draft={entityDraft} setDraft={setEntityDraft} attention={attention[1]}/>
               <ChecksSection session={session} patchSession={patchSession} patchEntity={patchEntity} attention={attention[2]}/>
               <DocumentsSection session={session} token={token} setSession={setSession} showToast={showToast} attention={attention[3]}/>
               <SignSection session={session} token={token} setSession={setSession} showToast={showToast} draftDirty={draftDirty}/>
@@ -505,12 +504,236 @@
       );
     }
 
+    /* ---- entity import wizard ---- */
+
+    // Field targets a column can map to. Multiple columns may map to an address —
+    // they get joined with commas (street / city / state / zip in separate columns).
+    const IMPORT_FIELDS = [
+      {key:'legal_name',    label:'Legal entity name', hint:/entit|legal|llc|company|owner(?!.*(addr|street))|corporation|landlord|creditor|^name$/i},
+      {key:'property_name', label:'Property / building', hint:/prop(ert)?|building|communit|complex|site|apartment|portfolio/i},
+      {key:'address',       label:'Address (combine ok)', hint:/addr|street|city|state|^st$|zip|postal|location/i, combine:true},
+      {key:'payable_to',    label:'Checks payable to', hint:/payable|pay\s*to/i},
+      {key:'check_address', label:'Check mailing address', hint:/(check|remit|mail).*(addr|to)|remit/i, combine:true},
+      {key:'',              label:'— Skip this column —'},
+    ];
+
+    // Delimiter- and quote-aware parser for CSV/TSV/pasted text.
+    function parseDelimited(text) {
+      const sample = text.split(/\r?\n/).filter(l=>l.trim()).slice(0, 20).join('\n');
+      let delim = ',', best = 0;
+      for (const d of ['\t', ',', ';', '|']) {
+        const n = (sample.match(new RegExp(d === '|' ? '\\|' : d, 'g')) || []).length;
+        if (n > best) { best = n; delim = d; }
+      }
+      if (best === 0) return text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean).map(l=>[l]);
+      const rows = [];
+      let row = [], cell = '', inQ = false;
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inQ) {
+          if (ch === '"') { if (text[i+1] === '"') { cell += '"'; i++; } else inQ = false; }
+          else cell += ch;
+        } else if (ch === '"') inQ = true;
+        else if (ch === delim) { row.push(cell); cell = ''; }
+        else if (ch === '\n' || ch === '\r') {
+          if (ch === '\r' && text[i+1] === '\n') i++;
+          row.push(cell); cell = '';
+          if (row.some(c=>c.trim())) rows.push(row.map(c=>c.trim()));
+          row = [];
+        } else cell += ch;
+      }
+      row.push(cell);
+      if (row.some(c=>c.trim())) rows.push(row.map(c=>c.trim()));
+      return rows;
+    }
+
+    // The Excel reader is ~900 KB, so it loads only when someone actually picks an .xlsx.
+    function loadXLSX() {
+      return new Promise((resolve, reject) => {
+        if (window.XLSX) return resolve(window.XLSX);
+        const s = document.createElement('script');
+        s.src = 'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+        s.onload = () => resolve(window.XLSX);
+        s.onerror = () => reject(new Error('Could not load the Excel reader — save the sheet as CSV and try that instead.'));
+        document.head.appendChild(s);
+      });
+    }
+
+    function looksLikeHeader(cells) {
+      return cells.some(c => IMPORT_FIELDS.some(f => f.hint && f.hint.test(String(c))));
+    }
+
+    function autoMap(headerCells, colCount) {
+      const mapping = Array(colCount).fill('');
+      const taken = new Set();
+      if (headerCells) {
+        headerCells.forEach((h, i) => {
+          for (const f of IMPORT_FIELDS) {
+            if (!f.key || !f.hint || !f.hint.test(String(h))) continue;
+            if (taken.has(f.key) && !f.combine) continue;
+            mapping[i] = f.key; taken.add(f.key); break;
+          }
+        });
+      } else {
+        // No headers: assume the same order the old paste format used.
+        ['legal_name','property_name','address','payable_to','check_address'].forEach((k, i) => { if (i < colCount) mapping[i] = k; });
+      }
+      if (!mapping.includes('legal_name')) mapping[0] = 'legal_name';
+      return mapping;
+    }
+
+    function ImportWizard({onClose, onImport, showToast}) {
+      const [rows, setRows] = useState(null);
+      const [hasHeader, setHasHeader] = useState(false);
+      const [mapping, setMapping] = useState([]);
+      const [sourceName, setSourceName] = useState('');
+      const [pasted, setPasted] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const [drag, setDrag] = useState(false);
+      const fileRef = useRef(null);
+
+      const ingest = (grid, name) => {
+        grid = grid.filter(r => r.some(c => String(c).trim()));
+        if (!grid.length) return setErr('No rows found — is the file empty?');
+        const width = Math.max(...grid.map(r=>r.length));
+        grid = grid.map(r => Array.from({length: width}, (_, i) => String(r[i] ?? '').trim()));
+        const header = grid.length > 1 && looksLikeHeader(grid[0]);
+        setRows(grid); setHasHeader(header);
+        setMapping(autoMap(header ? grid[0] : null, width));
+        setSourceName(name); setErr('');
+      };
+
+      const handleFile = async (file) => {
+        if (!file) return;
+        setErr('');
+        try {
+          if (/\.(xlsx|xls)$/i.test(file.name)) {
+            const XLSX = await loadXLSX();
+            const wb = XLSX.read(await file.arrayBuffer(), {type:'array'});
+            const ws = wb.Sheets[wb.SheetNames[0]];
+            ingest(XLSX.utils.sheet_to_json(ws, {header:1, raw:false, defval:''}), file.name);
+          } else {
+            ingest(parseDelimited(await file.text()), file.name);
+          }
+        } catch (e) { setErr(e.message); }
+      };
+
+      const dataRows = rows ? (hasHeader ? rows.slice(1) : rows) : [];
+      const buildEntities = () => dataRows.map(r => {
+        const ent = {};
+        mapping.forEach((field, i) => {
+          const val = r[i];
+          if (!field || !val) return;
+          const spec = IMPORT_FIELDS.find(f=>f.key===field);
+          if (ent[field] && spec && spec.combine) ent[field] += ', ' + val;
+          else if (!ent[field]) ent[field] = val;
+        });
+        return ent;
+      }).filter(e => (e.legal_name || '').trim());
+      const ready = rows ? buildEntities() : [];
+      const hasLegal = mapping.includes('legal_name');
+
+      const doImport = async () => {
+        if (!hasLegal) return setErr('Pick which column holds the legal entity name.');
+        if (!ready.length) return setErr('No usable rows — every entity needs at least a legal name.');
+        setBusy(true);
+        try { await onImport(ready); } catch (e) { setErr(e.message); setBusy(false); }
+      };
+
+      const PREVIEW_ROWS = 6;
+      return (
+        <div style={{position:'fixed',inset:0,zIndex:120,background:'rgba(26,26,46,.45)',display:'flex',alignItems:'flex-start',justifyContent:'center',padding:'4vh 14px',overflowY:'auto'}} onClick={onClose}>
+          <div className="fade-in" style={{background:'#fff',borderRadius:14,maxWidth:900,width:'100%',padding:'24px 26px',boxShadow:'0 24px 60px rgba(26,26,46,.3)'}} onClick={e=>e.stopPropagation()}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:4}}>
+              <div>
+                <b style={{fontSize:18,color:T.text}}>Import your entities</b>
+                <div style={{fontSize:13.5,color:T.textLight,marginTop:2}}>Drop in a spreadsheet or paste from anywhere — then just tell us which column is which.</div>
+              </div>
+              <button style={{...btnDanger,fontSize:16}} onClick={onClose}>✕</button>
+            </div>
+
+            {!rows ? (
+              <div style={{marginTop:14}}>
+                <div style={{border:`2px dashed ${drag?T.blue:T.blueMid}`,background:drag?T.blueLight:'#FAFBFD',borderRadius:12,padding:'26px 18px',textAlign:'center',transition:'all .15s',cursor:'pointer'}}
+                     onClick={()=>fileRef.current.click()}
+                     onDragOver={e=>{e.preventDefault();setDrag(true);}} onDragLeave={()=>setDrag(false)}
+                     onDrop={e=>{e.preventDefault();setDrag(false);handleFile(e.dataTransfer.files[0]);}}>
+                  <div style={{fontSize:26,marginBottom:6}}>📄</div>
+                  <b style={{fontSize:15,color:T.text}}>Drop a file here or click to choose</b>
+                  <div style={{fontSize:13,color:T.textLight,marginTop:4}}>Excel (.xlsx), CSV, or plain text — exports from Yardi, AppFolio, Buildium, Rent Manager, etc. all work</div>
+                  <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" style={{display:'none'}} onChange={e=>{handleFile(e.target.files[0]);e.target.value='';}}/>
+                </div>
+                <div style={{textAlign:'center',fontSize:12.5,color:T.textLight,fontWeight:700,margin:'12px 0'}}>— or paste below —</div>
+                <textarea style={{...inputStyle,minHeight:120,resize:'vertical',fontFamily:'monospace',fontSize:13}} value={pasted} onChange={e=>setPasted(e.target.value)}
+                  placeholder={'Paste rows copied from Excel / Google Sheets, or one entity per line:\nBuilding 1 LLC\tSunrise Towers\t100 Main St, Melbourne, FL\nBuilding 2 LLC'}/>
+                <div style={{display:'flex',justifyContent:'flex-end',marginTop:10}}>
+                  <button style={{...btnPrimary,padding:'10px 24px',opacity:pasted.trim()?1:0.5}} disabled={!pasted.trim()} onClick={()=>ingest(parseDelimited(pasted), 'pasted text')}>Continue →</button>
+                </div>
+              </div>
+            ) : (
+              <div style={{marginTop:12}}>
+                <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap',marginBottom:10}}>
+                  <Chip tone="info">{sourceName}</Chip>
+                  <label style={{display:'flex',gap:7,alignItems:'center',fontSize:13,fontWeight:600,color:T.textMid,cursor:'pointer'}}>
+                    <input type="checkbox" checked={hasHeader} onChange={e=>{setHasHeader(e.target.checked); setMapping(autoMap(e.target.checked ? rows[0] : null, rows[0].length));}} style={{width:15,height:15,accentColor:T.blue}}/>
+                    First row is column names
+                  </label>
+                  <span style={{flex:1}}/>
+                  <button style={{...btnDanger,fontSize:12.5}} onClick={()=>{setRows(null);setErr('');}}>← Start over</button>
+                </div>
+                <div style={{fontSize:13,color:T.textMid,marginBottom:8}}>Match each column using the dropdowns — we've taken a guess:</div>
+                <div style={{overflowX:'auto',border:`1px solid ${T.border}`,borderRadius:10}}>
+                  <table style={{borderCollapse:'collapse',width:'100%',minWidth:rows[0].length*150}}>
+                    <thead>
+                      <tr>
+                        {rows[0].map((_, i)=>(
+                          <th key={i} style={{padding:'8px 8px 6px',background:T.blueLight,borderBottom:`1px solid ${T.border}`,textAlign:'left'}}>
+                            <select value={mapping[i]||''} onChange={e=>setMapping(m=>{const n=[...m];n[i]=e.target.value;return n;})}
+                                    style={{...inputStyle,padding:'7px 8px',fontSize:12.5,fontWeight:700,width:'100%',color:mapping[i]?T.blue:T.textLight,cursor:'pointer'}}>
+                              {IMPORT_FIELDS.map(f=><option key={f.key} value={f.key}>{f.label}</option>)}
+                            </select>
+                            {hasHeader && <div style={{fontSize:11,color:T.textLight,fontWeight:600,marginTop:4,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:170}}>was: “{rows[0][i]}”</div>}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dataRows.slice(0, PREVIEW_ROWS).map((r, ri)=>(
+                        <tr key={ri}>
+                          {rows[0].map((_, ci)=>(
+                            <td key={ci} style={{padding:'7px 10px',borderTop:`1px solid ${T.border}`,fontSize:13,color:mapping[ci]?T.text:T.textLight,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',maxWidth:180}}>{r[ci]}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {dataRows.length > PREVIEW_ROWS && <div style={{fontSize:12.5,color:T.textLight,marginTop:6}}>…and {dataRows.length - PREVIEW_ROWS} more row{dataRows.length-PREVIEW_ROWS===1?'':'s'}</div>}
+                <div style={{display:'flex',gap:12,alignItems:'center',flexWrap:'wrap',marginTop:14}}>
+                  <span style={{fontSize:13.5,fontWeight:700,color:ready.length?T.green:T.warn}}>
+                    {ready.length} entit{ready.length===1?'y':'ies'} ready{dataRows.length-ready.length>0?` · ${dataRows.length-ready.length} skipped (no entity name)`:''}
+                  </span>
+                  <span style={{flex:1}}/>
+                  <button style={btnGhost} onClick={onClose}>Cancel</button>
+                  <button style={{...btnPrimary,padding:'11px 26px',opacity:(busy||!ready.length)?0.55:1}} disabled={busy||!ready.length} onClick={doImport}>
+                    {busy ? 'Importing…' : `Import ${ready.length} entit${ready.length===1?'y':'ies'}`}
+                  </button>
+                </div>
+              </div>
+            )}
+            {err && <div style={{color:T.red,fontSize:13.5,fontWeight:600,marginTop:10}}>⚠ {err}</div>}
+          </div>
+        </div>
+      );
+    }
+
     /* ---- 2. entities ---- */
 
     const LEGAL_NAME_TIP = "Exactly as it appears on your lease agreements — including LLC, LP, Inc., etc. The collection agreement is between ACB and this entity.";
 
-    function EntitiesSection({session, addEntities, patchEntity, removeEntity, showToast, draft, setDraft, bulkText, setBulkText, attention}) {
-      const [showBulk, setShowBulk] = useState(false);
+    function EntitiesSection({session, addEntities, patchEntity, removeEntity, showToast, draft, setDraft, attention}) {
+      const [showImport, setShowImport] = useState(false);
       const [busy, setBusy] = useState(false);
       const [contactOpen, setContactOpen] = useState({});
       const draftDirty = Object.values(draft).some(v=>String(v).trim());
@@ -519,17 +742,6 @@
         if (!draft.legal_name.trim()) return showToast('Enter the legal entity name first');
         setBusy(true);
         try { await addEntities([draft]); setDraft({legal_name:'',property_name:'',address:''}); }
-        catch (e) { showToast(e.message); }
-        setBusy(false);
-      };
-      const addBulk = async () => {
-        const list = bulkText.split('\n').map(l=>l.trim()).filter(Boolean).map(line=>{
-          const parts = line.split(/\s*[|;\t]\s*/);
-          return {legal_name:parts[0]||'', property_name:parts[1]||'', address:parts[2]||''};
-        }).filter(e=>e.legal_name);
-        if (!list.length) return showToast('Paste at least one entity name');
-        setBusy(true);
-        try { await addEntities(list); setBulkText(''); setShowBulk(false); showToast(`Added ${list.length} ${list.length===1?'entity':'entities'}`); }
         catch (e) { showToast(e.message); }
         setBusy(false);
       };
@@ -580,23 +792,16 @@
             <Field label="Property address" style={{marginBottom:12}}><input style={inputStyle} value={draft.address} onChange={e=>setDraft(d=>({...d,address:e.target.value}))} placeholder="Street, City, State, ZIP" onKeyDown={e=>e.key==='Enter'&&add()}/></Field>
             <div style={{display:'flex',gap:10,flexWrap:'wrap',alignItems:'center'}}>
               <button style={{...btnPrimary,padding:'10px 22px',opacity:busy?0.6:1,boxShadow:draftDirty?`0 0 0 4px ${T.blueMid}`:'none',transition:'box-shadow .2s'}} disabled={busy} onClick={add}>+ Add entity</button>
-              <button style={btnGhost} onClick={()=>setShowBulk(v=>!v)}>{showBulk?'Hide bulk add':'Paste a list instead'}</button>
+              <button style={btnGhost} onClick={()=>setShowImport(true)}>📥 Import a list (Excel, CSV, or paste)</button>
             </div>
             {draftDirty && (
               <div style={{marginTop:10,background:T.warnBg,border:`1px solid ${T.warn}`,borderRadius:10,padding:'8px 13px',fontSize:13,color:T.textMid,fontWeight:600}} className="fade-in">
                 ⚠ This entity isn't saved yet — press <b>+ Add entity</b> to include it in your agreements.
               </div>
             )}
-            {showBulk && (
-              <div style={{marginTop:14}} className="fade-in">
-                <Field label="One entity per line" hint="optionally add property name and address separated by | ">
-                  <textarea style={{...inputStyle,minHeight:110,resize:'vertical'}} value={bulkText} onChange={e=>setBulkText(e.target.value)}
-                    placeholder={"Building 1 LLC | Sunrise Towers | 100 Main St, Melbourne, FL\nBuilding 2 LLC\nBuilding 3 LLC"}/>
-                </Field>
-                <button style={{...btnPrimary,padding:'10px 22px',opacity:busy?0.6:1}} disabled={busy} onClick={addBulk}>Add all</button>
-              </div>
-            )}
           </div>
+          {showImport && <ImportWizard onClose={()=>setShowImport(false)} showToast={showToast}
+            onImport={async (list)=>{ await addEntities(list); setShowImport(false); showToast(`Added ${list.length} ${list.length===1?'entity':'entities'} 🎉`); }}/>}
         </SectionCard>
       );
     }
@@ -1022,6 +1227,114 @@
       );
     }
 
+    /* ============ owner review (read-only) ============ */
+
+    function OwnerReview({rtoken}) {
+      const [data, setData] = useState(null);
+      const [error, setError] = useState('');
+      useEffect(() => {
+        api(`/api/review/${rtoken}`).then(setData).catch(e=>setError(e.message));
+      }, [rtoken]);
+
+      if (error) return (
+        <div style={{maxWidth:520,margin:'80px auto',textAlign:'center',padding:20}}>
+          <Brand/>
+          <div style={{...card,marginTop:30,padding:'34px'}}>
+            <div style={{fontSize:19,fontWeight:700,color:T.text,marginBottom:8}}>Link not found</div>
+            <div style={{fontSize:15,color:T.textMid}}>{error}</div>
+          </div>
+        </div>
+      );
+      if (!data) return <div style={{textAlign:'center',padding:100,color:T.textLight,fontWeight:600}}>Loading…</div>;
+
+      const r = data.review || {};
+      const rentRange = (r.rent_min || r.rent_max) ? `${r.rent_min || '?'} – ${r.rent_max || '?'}` : '';
+      const stats = [
+        r.units && {label:'Units', value:r.units},
+        rentRange && {label:'Rent roll', value:rentRange},
+        r.rent_avg && {label:'Average rent', value:r.rent_avg},
+        {label:'Agreements', value:`${data.progress.signed}/${data.progress.total} signed`},
+      ].filter(Boolean);
+      const leases = data.files.filter(f=>f.kind==='lease');
+      const mgmts = data.files.filter(f=>f.kind==='management_agreement');
+      const fmtD = (iso) => iso ? new Date(iso).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '';
+
+      const docRow = (label, href, hrefDl) => (
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'10px 0',borderTop:`1px solid ${T.border}`,flexWrap:'wrap'}}>
+          <span style={{fontSize:14.5,color:T.text,fontWeight:600,minWidth:0}}>{label}</span>
+          <span style={{display:'flex',gap:8,flexShrink:0}}>
+            <a href={href} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px'}}>👁 View</a>
+            {hrefDl && <a href={hrefDl} style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px'}}>⬇</a>}
+          </span>
+        </div>
+      );
+
+      return (
+        <div style={{maxWidth:720,margin:'0 auto',padding:'40px 18px 80px'}}>
+          <Brand/>
+          <div style={{textAlign:'center',margin:'26px 0 22px'}}>
+            <div style={{fontSize:13,fontWeight:700,color:T.textLight,textTransform:'uppercase',letterSpacing:0.6}}>New Client Review</div>
+            <h1 style={{fontSize:29,fontWeight:800,color:T.text,letterSpacing:-0.4,margin:'6px 0 10px'}}>{data.company_name}</h1>
+            <div style={{display:'flex',gap:8,justifyContent:'center',flexWrap:'wrap'}}>
+              <Chip tone="info">{data.mgmt_type==='third_party'?'Third-Party Management':data.mgmt_type==='owner_operator'?'Owner Operator':'Type not set'}</Chip>
+              {data.completed_at ? <Chip tone="done">All signed ✓</Chip> : <Chip tone="todo">{data.progress.signed}/{data.progress.total} signed</Chip>}
+            </div>
+          </div>
+
+          {stats.length > 1 && (
+            <div style={{display:'flex',gap:12,flexWrap:'wrap',marginBottom:16}}>
+              {stats.map((st,i)=>(
+                <div key={i} style={{...card,flex:'1 1 130px',padding:'14px 18px',marginBottom:0,textAlign:'center'}}>
+                  <div style={{fontSize:11.5,fontWeight:700,color:T.textLight,textTransform:'uppercase',letterSpacing:0.5}}>{st.label}</div>
+                  <div style={{fontSize:19,fontWeight:800,color:T.text,marginTop:3}}>{st.value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {r.notes && (
+            <div style={{...card,padding:'18px 22px'}}>
+              <b style={{fontSize:14.5,color:T.text,display:'block',marginBottom:8}}>Notes</b>
+              <div style={{fontSize:14.5,color:T.textMid,lineHeight:1.65,whiteSpace:'pre-wrap'}}>{r.notes}</div>
+              {data.review_updated_at && <div style={{fontSize:12,color:T.textLight,marginTop:10}}>Prepared {fmtD(data.review_updated_at)}</div>}
+            </div>
+          )}
+
+          <div style={{...card,padding:'18px 22px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:4}}>
+              <b style={{fontSize:14.5,color:T.text}}>Collection agreements ({data.entities.length})</b>
+              {data.entities.length > 1 && <a href={`/api/review/${rtoken}/agreements.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px'}}>👁 View all as one PDF</a>}
+            </div>
+            {data.entities.map(e=>(
+              <div key={e.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'10px 0',borderTop:`1px solid ${T.border}`,flexWrap:'wrap'}}>
+                <div style={{minWidth:0,flex:'1 1 220px'}}>
+                  <b style={{fontSize:14.5,color:T.text}}>{e.legal_name}</b>{e.property_name && <span style={{color:T.textLight,fontSize:13}}> · {e.property_name}</span>}
+                  <div style={{fontSize:12.5,color:T.textLight,marginTop:1}}>
+                    {e.signed_at ? <span style={{color:T.green,fontWeight:700}}>Signed {fmtD(e.signed_at)} by {e.signer_name}</span> : <span style={{color:T.warn,fontWeight:700}}>Unsigned</span>}
+                    {' '}· checks to {e.resolved_payment.payableTo}
+                  </div>
+                </div>
+                <a href={`/api/review/${rtoken}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px',flexShrink:0}}>👁 View</a>
+              </div>
+            ))}
+          </div>
+
+          {(leases.length > 0 || mgmts.length > 0) && (
+            <div style={{...card,padding:'18px 22px'}}>
+              <b style={{fontSize:14.5,color:T.text,display:'block',marginBottom:4}}>Documents</b>
+              {leases.map(f=>docRow(`Lease — ${f.original_name}`, `/api/review/${rtoken}/files/${f.id}/download?inline=1`, `/api/review/${rtoken}/files/${f.id}/download`))}
+              {mgmts.map(f=>docRow(`Management agreement — ${f.original_name}`, `/api/review/${rtoken}/files/${f.id}/download?inline=1`, `/api/review/${rtoken}/files/${f.id}/download`))}
+            </div>
+          )}
+
+          <footer style={{textAlign:'center',color:T.textLight,fontSize:13,marginTop:26,lineHeight:1.7}}>
+            Advanced Collection Bureau, Inc. · Prepared for internal review<br/>
+            Questions? {`Call or text (321) 379-6063`}
+          </footer>
+        </div>
+      );
+    }
+
     /* ============ admin ============ */
 
     const fmtBytes = (n) => {
@@ -1176,6 +1489,59 @@
             </div>
           )}
           {open && !cfg && note && <div style={{fontSize:13,fontWeight:600,color:T.red,marginTop:10}}>{note.text}</div>}
+        </div>
+      );
+    }
+
+    // ACB's research notes + the owner's read-only share link, per onboarding.
+    function OwnerReviewBox({s, adminKey, replaceSession}) {
+      const r = s.review || {};
+      const [open, setOpen] = useState(false);
+      const [form, setForm] = useState({units:r.units||'', rent_min:r.rent_min||'', rent_max:r.rent_max||'', rent_avg:r.rent_avg||'', notes:r.notes||''});
+      const [busy, setBusy] = useState(false);
+      const [copied, setCopied] = useState(false);
+      const set = (k)=>(e)=>setForm(f=>({...f,[k]:e.target.value}));
+      const reviewUrl = s.review_token ? `${window.location.origin}/r/${s.review_token}` : null;
+
+      const save = async () => {
+        setBusy(true);
+        try { replaceSession(await api(`/api/admin/sessions/${s.token}/review?key=${encodeURIComponent(adminKey)}`, {method:'PUT', body:form})); }
+        catch (e) { alert(e.message); }
+        setBusy(false);
+      };
+      const copy = async () => {
+        try { await navigator.clipboard.writeText(reviewUrl); } catch (e) {}
+        setCopied(true); setTimeout(()=>setCopied(false), 2000);
+      };
+      const smallInput = {...inputStyle, padding:'8px 11px', fontSize:13.5};
+
+      return (
+        <div style={{marginTop:12,background:'#FAFBFD',border:`1px solid ${T.border}`,borderRadius:10,padding:'9px 13px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',flexWrap:'wrap'}} onClick={()=>setOpen(o=>!o)}>
+            <span style={{fontSize:13,color:T.text,fontWeight:700}}>📋 Owner review packet</span>
+            {s.review_token ? <Chip tone="done">Link created</Chip> : <Chip tone="muted">Not prepared</Chip>}
+            <span style={{flex:1}}/>
+            {reviewUrl && <button style={{...btnGhost,fontSize:12.5,padding:'6px 13px'}} onClick={(ev)=>{ev.stopPropagation();copy();}}>{copied?'Copied ✓':'🔗 Copy owner link'}</button>}
+            <span style={{color:T.textLight,fontSize:12,fontWeight:700}}>{open?'▲':'▼'}</span>
+          </div>
+          {open && (
+            <div className="fade-in" style={{marginTop:10,borderTop:`1px solid ${T.border}`,paddingTop:10}}>
+              <div style={{display:'flex',gap:10,flexWrap:'wrap',marginBottom:8}}>
+                <Field label="# of units" style={{flex:'1 1 90px',marginBottom:0}}><input style={smallInput} value={form.units} onChange={set('units')} placeholder="120"/></Field>
+                <Field label="Lowest rent" style={{flex:'1 1 100px',marginBottom:0}}><input style={smallInput} value={form.rent_min} onChange={set('rent_min')} placeholder="$950"/></Field>
+                <Field label="Highest rent" style={{flex:'1 1 100px',marginBottom:0}}><input style={smallInput} value={form.rent_max} onChange={set('rent_max')} placeholder="$2,400"/></Field>
+                <Field label="Average rent" style={{flex:'1 1 100px',marginBottom:0}}><input style={smallInput} value={form.rent_avg} onChange={set('rent_avg')} placeholder="$1,450"/></Field>
+              </div>
+              <Field label="Notes" hint="what the owner should know — anything notable about the company, portfolio, or risk" style={{marginBottom:10}}>
+                <textarea style={{...smallInput,minHeight:80,resize:'vertical',width:'100%'}} value={form.notes} onChange={set('notes')} placeholder="Solid regional operator, ~120 units across 3 LLCs. Clean leases, uses corporate remittance. Nothing unusual."/>
+              </Field>
+              <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+                <button style={{...btnPrimary,padding:'9px 20px',fontSize:13.5,opacity:busy?0.55:1}} disabled={busy} onClick={save}>{s.review_token ? 'Update packet' : 'Save & create owner link'}</button>
+                {reviewUrl && <a href={reviewUrl} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:12.5,padding:'7px 14px'}}>Preview what the owner sees</a>}
+              </div>
+              {reviewUrl && <div style={{fontSize:12,color:T.textLight,marginTop:8}}>Owner link (read-only, no editing possible): <a href={reviewUrl} style={{color:T.blue}}>{reviewUrl}</a></div>}
+            </div>
+          )}
         </div>
       );
     }
@@ -1375,6 +1741,7 @@
                           </div>
                         )}
 
+                        <OwnerReviewBox s={s} adminKey={key} replaceSession={replaceSession}/>
                         {!s.completed_at && (
                           <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap',marginTop:12,background:'#FAFBFD',border:`1px solid ${T.border}`,borderRadius:10,padding:'9px 13px'}}>
                             <span style={{fontSize:13,color:T.textMid}}>
@@ -1422,6 +1789,8 @@
       const path = window.location.pathname;
       const m = path.match(/^\/o\/([A-Za-z0-9_-]+)/);
       if (m) return <Portal token={m[1]}/>;
+      const rv = path.match(/^\/r\/([A-Za-z0-9_-]+)/);
+      if (rv) return <OwnerReview rtoken={rv[1]}/>;
       if (path === '/admin') return <Admin/>;
       return <Landing/>;
     }

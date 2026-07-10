@@ -72,6 +72,9 @@ for (const col of [
   'reminder_count INTEGER NOT NULL DEFAULT 0',
   'last_reminder_at TEXT',
   'reminders_muted INTEGER NOT NULL DEFAULT 0',
+  'review_token TEXT',
+  'review_notes TEXT',
+  'review_updated_at TEXT',
 ]) {
   try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }
