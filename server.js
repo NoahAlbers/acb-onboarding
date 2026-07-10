@@ -156,6 +156,8 @@ function serializeSession(session, opts = {}) {
       sign_url: e.signed_at ? null : docuseal.signUrl(e.docuseal_slug),
       docuseal_pending: !!(e.docuseal_submission_id && !e.signed_at),
       signed_doc_url: e.signed_doc_url,
+      collector_signed_at: e.collector_signed_at,
+      collector_name: e.collector_name,
       resolved_payment: resolvePayment(session, e),
     })),
     files,
@@ -184,11 +186,17 @@ function serializeReview(session) {
     completed_at: s.completed_at,
     review: parseReviewNotes(session),
     review_updated_at: session.review_updated_at,
-    entities: s.entities.map((e) => ({
-      id: e.id, legal_name: e.legal_name, property_name: e.property_name, address: e.address,
-      signed_at: e.signed_at, signer_name: e.signer_name, signer_title: e.signer_title,
-      resolved_payment: e.resolved_payment,
-    })),
+    signing_mode: s.signing_mode,
+    entities: s.entities.map((e, i) => {
+      const row = db.prepare('SELECT docuseal_collector_slug FROM entities WHERE id = ?').get(e.id) || {};
+      return {
+        id: e.id, legal_name: e.legal_name, property_name: e.property_name, address: e.address,
+        signed_at: e.signed_at, signer_name: e.signer_name, signer_title: e.signer_title,
+        collector_signed_at: e.collector_signed_at, collector_name: e.collector_name,
+        countersign_src: (docuseal.enabled() && e.signed_at && !e.collector_signed_at) ? docuseal.signUrl(row.docuseal_collector_slug) : null,
+        resolved_payment: e.resolved_payment,
+      };
+    }),
     files: s.files,
     progress: s.progress,
   };
@@ -670,8 +678,62 @@ function requireReview(req, res, next) {
   next();
 }
 
-app.get('/api/review/:rtoken', requireReview, (req, res) => {
-  res.json(serializeReview(req.session));
+// In DocuSeal mode, look up the ACB countersigner slug/status for signed entities.
+async function refreshCollectorStatuses(session) {
+  if (!docuseal.enabled()) return;
+  const pending = db.prepare(
+    'SELECT * FROM entities WHERE session_id = ? AND docuseal_submission_id IS NOT NULL AND signed_at IS NOT NULL AND collector_signed_at IS NULL'
+  ).all(session.id);
+  for (const e of pending) {
+    try {
+      const st = await docuseal.getCollectorStatus(e.docuseal_submission_id);
+      if (!st) continue;
+      db.prepare('UPDATE entities SET docuseal_collector_slug = ?, collector_signed_at = COALESCE(?, collector_signed_at), collector_name = COALESCE(collector_name, ?), signed_doc_url = COALESCE(?, signed_doc_url) WHERE id = ?')
+        .run(st.slug || e.docuseal_collector_slug, st.completed_at, st.name, st.completed_at ? st.document_url : null, e.id);
+    } catch (err) {
+      console.error(`Collector status refresh failed for entity ${e.id}:`, err.message);
+    }
+  }
+}
+
+// When the owner has countersigned everything, tell ACB once.
+async function maybeNotifyCountersigned(session) {
+  const fresh = getSession(session.token);
+  const entities = db.prepare("SELECT * FROM entities WHERE session_id = ? AND legal_name != ''").all(fresh.id);
+  const done = entities.length > 0 && entities.every((e) => e.signed_at && e.collector_signed_at);
+  if (!done || fresh.countersigned_notified_at || !NOTIFY_ENABLED) return;
+  db.prepare('UPDATE sessions SET countersigned_notified_at = ? WHERE id = ?').run(now(), fresh.id);
+  const settings = getSettings();
+  if (!mailer.enabled() || !settings.notify_emails.trim()) return;
+  try {
+    const msg = emails.countersignedEmailAcb(serializeSession(fresh), portalUrlFor(fresh));
+    await mailer.send({ to: settings.notify_emails, ...msg, attachments: await buildNotifyAttachments(fresh, settings) });
+  } catch (e) {
+    console.error('Countersign notification failed:', e.message);
+  }
+}
+
+app.get('/api/review/:rtoken', requireReview, async (req, res) => {
+  await refreshCollectorStatuses(req.session);
+  await maybeNotifyCountersigned(req.session);
+  res.json(serializeReview(db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.session.id)));
+});
+
+// Built-in signing mode: the owner countersigns every client-signed agreement at once.
+app.post('/api/review/:rtoken/countersign', rateLimit('countersign', 30, 15 * 60 * 1000), requireReview, async (req, res) => {
+  const { signer_name, signer_title, signature } = req.body || {};
+  const name = String(signer_name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Please enter the full name of the person signing.' });
+  if (typeof signature !== 'string' || !signature.startsWith('data:image/png;base64,') || signature.length > 500000) {
+    return res.status(400).json({ error: 'Signature image is missing or invalid.' });
+  }
+  const result = db.prepare(
+    `UPDATE entities SET collector_signature = ?, collector_name = ?, collector_title = ?, collector_signed_at = ?
+     WHERE session_id = ? AND signed_at IS NOT NULL AND collector_signed_at IS NULL AND legal_name != ''`
+  ).run(signature, name, String(signer_title || '').trim(), now(), req.session.id);
+  if (!result.changes) return res.status(400).json({ error: 'Nothing to countersign yet — the client has to sign first.' });
+  await maybeNotifyCountersigned(req.session);
+  res.json({ countersigned: result.changes, ...serializeReview(db.prepare('SELECT * FROM sessions WHERE id = ?').get(req.session.id)) });
 });
 
 app.get('/api/review/:rtoken/agreements.pdf', requireReview, async (req, res) => {

@@ -1229,12 +1229,121 @@
 
     /* ============ owner review (read-only) ============ */
 
+    // DocuSeal's embedded signing form, loaded on demand.
+    function DocusealEmbed({src, onCompleted}) {
+      const holder = useRef(null);
+      useEffect(() => {
+        let gone = false;
+        const ensure = () => new Promise((res, rej) => {
+          if (window.customElements && window.customElements.get('docuseal-form')) return res();
+          let s = document.getElementById('docuseal-js');
+          if (!s) { s = document.createElement('script'); s.id = 'docuseal-js'; s.src = 'https://cdn.docuseal.com/js/form.js'; document.head.appendChild(s); }
+          s.addEventListener('load', () => res());
+          s.addEventListener('error', () => rej(new Error('Could not load the signing form.')));
+        });
+        ensure().then(() => {
+          if (gone || !holder.current) return;
+          const el = document.createElement('docuseal-form');
+          el.setAttribute('data-src', src);
+          el.setAttribute('data-with-title', 'false');
+          el.addEventListener('completed', onCompleted);
+          holder.current.innerHTML = '';
+          holder.current.appendChild(el);
+        }).catch(() => {});
+        return () => { gone = true; };
+      }, [src]);
+      return <div ref={holder} style={{minHeight:420}}/>;
+    }
+
+    // The owner signs the Collector line on every client-signed agreement in one go.
+    function CounterSignPanel({rtoken, pendingCount, onSigned}) {
+      const [name, setName] = useState('');
+      const [title, setTitle] = useState('');
+      const [sigMode, setSigMode] = useState('draw');
+      const [typed, setTyped] = useState('');
+      const [busy, setBusy] = useState(false);
+      const [err, setErr] = useState('');
+      const canvasRef = useRef(null);
+      const drawn = useRef(false);
+
+      useEffect(() => {
+        const cv = canvasRef.current;
+        if (!cv || sigMode !== 'draw') return;
+        const ctx = cv.getContext('2d');
+        ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = '#1A1A2E';
+        let active = false;
+        const pos = (e) => { const r = cv.getBoundingClientRect(); return { x:(e.clientX-r.left)*(cv.width/r.width), y:(e.clientY-r.top)*(cv.height/r.height) }; };
+        const down = (e) => { active = true; drawn.current = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); cv.setPointerCapture(e.pointerId); };
+        const move = (e) => { if (!active) return; const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); };
+        const up = () => { active = false; };
+        cv.addEventListener('pointerdown', down); cv.addEventListener('pointermove', move); cv.addEventListener('pointerup', up);
+        return () => { cv.removeEventListener('pointerdown', down); cv.removeEventListener('pointermove', move); cv.removeEventListener('pointerup', up); };
+      }, [sigMode]);
+
+      const buildSignature = async () => {
+        if (sigMode === 'draw') {
+          if (!drawn.current) throw new Error('Please draw your signature first.');
+          return canvasRef.current.toDataURL('image/png');
+        }
+        const text = (typed || name).trim();
+        if (!text) throw new Error('Type your signature first.');
+        await document.fonts.load('600 64px Caveat');
+        const cv = document.createElement('canvas'); cv.width = 640; cv.height = 160;
+        const ctx = cv.getContext('2d');
+        let size = 64; ctx.font = `600 ${size}px Caveat, cursive`; ctx.fillStyle = '#1A1A2E'; ctx.textBaseline = 'middle';
+        while (size > 22 && ctx.measureText(text).width > 600) { size -= 4; ctx.font = `600 ${size}px Caveat, cursive`; }
+        ctx.fillText(text, 20, 84);
+        return cv.toDataURL('image/png');
+      };
+
+      const sign = async () => {
+        if (!name.trim()) return setErr('Enter your full name first.');
+        setErr(''); setBusy(true);
+        try {
+          const signature = await buildSignature();
+          onSigned(await api(`/api/review/${rtoken}/countersign`, {method:'POST', body:{signer_name:name, signer_title:title, signature}}));
+        } catch (e) { setErr(e.message); setBusy(false); }
+      };
+
+      return (
+        <div style={{...card,padding:'20px 22px',border:`2px solid ${T.blueMid}`}}>
+          <b style={{fontSize:16,color:T.text,display:'block'}}>Sign as Collector — Advanced Collection Bureau</b>
+          <div style={{fontSize:13.5,color:T.textLight,margin:'4px 0 14px'}}>One signature countersigns all {pendingCount} agreement{pendingCount===1?'':'s'} above and fully executes {pendingCount===1?'it':'them'}.</div>
+          <div style={{display:'flex',gap:14,flexWrap:'wrap'}}>
+            <Field label="Your full name" style={{flex:'1 1 200px'}}><input style={inputStyle} value={name} onChange={e=>setName(e.target.value)} placeholder="Full name"/></Field>
+            <Field label="Title" hint="optional" style={{flex:'1 1 160px'}}><input style={inputStyle} value={title} onChange={e=>setTitle(e.target.value)} placeholder="Owner"/></Field>
+          </div>
+          <div style={{display:'flex',gap:8,marginBottom:10}}>
+            {['draw','type'].map(m=>(
+              <button key={m} onClick={()=>setSigMode(m)} style={{...btnGhost,background:sigMode===m?T.blue:T.blueLight,color:sigMode===m?'#fff':T.blue,padding:'7px 18px',fontSize:13.5}}>{m==='draw'?'✍ Draw':'⌨ Type'}</button>
+            ))}
+          </div>
+          {sigMode==='draw' ? (
+            <div style={{marginBottom:12}}>
+              <canvas ref={canvasRef} width={640} height={160} style={{width:'100%',maxWidth:640,height:150,border:`1.5px solid ${T.border}`,borderRadius:10,background:'#fff',touchAction:'none',cursor:'crosshair',display:'block'}}/>
+              <button style={{...btnDanger,marginTop:4}} onClick={()=>{const cv=canvasRef.current; if(cv) cv.getContext('2d').clearRect(0,0,cv.width,cv.height); drawn.current=false;}}>Clear</button>
+            </div>
+          ) : (
+            <div style={{marginBottom:12}}>
+              <input style={{...inputStyle,maxWidth:640,fontFamily:'Caveat, cursive',fontSize:34,fontWeight:600,padding:'8px 16px'}} value={typed} onChange={e=>setTyped(e.target.value)} placeholder={name || 'Type your signature'}/>
+            </div>
+          )}
+          {err && <div style={{color:T.red,fontSize:13.5,fontWeight:600,marginBottom:10}}>⚠ {err}</div>}
+          <button style={{...btnPrimary,fontSize:16,padding:'13px 30px',opacity:busy?0.6:1}} disabled={busy} onClick={sign}>
+            {busy ? 'Signing…' : `Countersign ${pendingCount} agreement${pendingCount===1?'':'s'}`}
+          </button>
+        </div>
+      );
+    }
+
     function OwnerReview({rtoken}) {
       const [data, setData] = useState(null);
       const [error, setError] = useState('');
-      useEffect(() => {
-        api(`/api/review/${rtoken}`).then(setData).catch(e=>setError(e.message));
-      }, [rtoken]);
+      const [ver, setVer] = useState(0);       // bumps to refresh the inline PDFs
+      const [celebrate, setCelebrate] = useState(false);
+      const reload = () => api(`/api/review/${rtoken}`).then(s=>{setData(s); setVer(v=>v+1);}).catch(e=>setError(e.message));
+      useEffect(() => { reload(); }, [rtoken]);
+      const onSigned = (s) => { setData(s); setVer(v=>v+1); setCelebrate(true); setTimeout(()=>setCelebrate(false), 4500); };
 
       if (error) return (
         <div style={{maxWidth:520,margin:'80px auto',textAlign:'center',padding:20}}>
@@ -1300,24 +1409,62 @@
             </div>
           )}
 
-          <div style={{...card,padding:'18px 22px'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap',marginBottom:4}}>
-              <b style={{fontSize:14.5,color:T.text}}>Collection agreements ({data.entities.length})</b>
-              {data.entities.length > 1 && <a href={`/api/review/${rtoken}/agreements.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px'}}>👁 View all as one PDF</a>}
-            </div>
-            {data.entities.map(e=>(
-              <div key={e.id} style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,padding:'10px 0',borderTop:`1px solid ${T.border}`,flexWrap:'wrap'}}>
-                <div style={{minWidth:0,flex:'1 1 220px'}}>
-                  <b style={{fontSize:14.5,color:T.text}}>{e.legal_name}</b>{e.property_name && <span style={{color:T.textLight,fontSize:13}}> · {e.property_name}</span>}
-                  <div style={{fontSize:12.5,color:T.textLight,marginTop:1}}>
-                    {e.signed_at ? <span style={{color:T.green,fontWeight:700}}>Signed {fmtD(e.signed_at)} by {e.signer_name}</span> : <span style={{color:T.warn,fontWeight:700}}>Unsigned</span>}
-                    {' '}· checks to {e.resolved_payment.payableTo}
-                  </div>
+          {(() => {
+            const pending = data.entities.filter(e=>e.signed_at && !e.collector_signed_at);
+            const executed = data.entities.filter(e=>e.signed_at && e.collector_signed_at);
+            const waiting = data.entities.filter(e=>!e.signed_at);
+            const allExecuted = data.entities.length > 0 && executed.length === data.entities.length;
+            return (
+              <div>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,flexWrap:'wrap',margin:'4px 2px 10px'}}>
+                  <b style={{fontSize:15.5,color:T.text}}>Collection agreements ({data.entities.length})</b>
+                  {data.entities.length > 1 && <a href={`/api/review/${rtoken}/agreements.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px'}}>👁 Open all as one PDF</a>}
                 </div>
-                <a href={`/api/review/${rtoken}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{...btnGhost,textDecoration:'none',fontSize:13,padding:'7px 15px',flexShrink:0}}>👁 View</a>
+                {pending.length > 0 && data.signing_mode === 'builtin' && (
+                  <div style={{background:T.blueLight,border:`1px solid ${T.blueMid}`,borderRadius:12,padding:'11px 16px',fontSize:13.5,color:T.textMid,marginBottom:14,lineHeight:1.5}}>
+                    <b style={{color:T.blue}}>{pending.length} agreement{pending.length===1?' is':'s are'} ready for your countersignature.</b>{' '}
+                    Scroll through each one below, then sign once at the bottom to execute them all.
+                  </div>
+                )}
+                {data.entities.map((e, idx)=>(
+                  <div key={e.id} style={{...card,padding:'14px 16px'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:10}}>
+                      <div>
+                        <b style={{fontSize:15,color:T.text}}>{idx+1}. {e.legal_name}</b>{e.property_name && <span style={{color:T.textLight,fontSize:13}}> · {e.property_name}</span>}
+                        <div style={{fontSize:12.5,color:T.textLight,marginTop:1}}>
+                          {e.signed_at ? `Client signed ${new Date(e.signed_at).toLocaleDateString()} by ${e.signer_name}` : 'Client has not signed yet'} · checks to {e.resolved_payment.payableTo}
+                        </div>
+                      </div>
+                      {e.collector_signed_at ? <Chip tone="done">Fully executed ✓</Chip> : e.signed_at ? <Chip tone="todo">Needs your signature</Chip> : <Chip tone="muted">Waiting on client</Chip>}
+                    </div>
+                    {e.countersign_src ? (
+                      <DocusealEmbed src={e.countersign_src} onCompleted={reload}/>
+                    ) : (
+                      <div>
+                        <iframe title={e.legal_name} src={`/api/review/${rtoken}/entities/${e.id}/agreement.pdf?v=${ver}#toolbar=0&navpanes=0`}
+                                style={{width:'100%',height:640,border:`1px solid ${T.border}`,borderRadius:10,background:'#fff'}}/>
+                        <div style={{fontSize:12.5,marginTop:5}}>
+                          <a href={`/api/review/${rtoken}/entities/${e.id}/agreement.pdf`} target="_blank" rel="noopener" style={{color:T.blue,fontWeight:600,textDecoration:'none'}}>Trouble viewing? Open the PDF in a new tab ↗</a>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {data.signing_mode === 'builtin' && pending.length > 0 && (
+                  <CounterSignPanel rtoken={rtoken} pendingCount={pending.length} onSigned={onSigned}/>
+                )}
+                {allExecuted && (
+                  <div style={{background:T.greenBg,border:'1px solid #BFE8CF',borderRadius:12,padding:'18px 22px',marginBottom:18}} className="fade-in">
+                    <div style={{fontSize:16.5,fontWeight:800,color:T.green,marginBottom:4}}>🖋 All {data.entities.length} agreement{data.entities.length===1?'':'s'} fully executed</div>
+                    <div style={{fontSize:14,color:T.textMid}}>Every agreement is signed by both parties. ACB has been notified automatically.</div>
+                  </div>
+                )}
+                {waiting.length > 0 && pending.length === 0 && !allExecuted && (
+                  <div style={{fontSize:13.5,color:T.textLight,margin:'0 2px 16px'}}>The client still needs to sign {waiting.length} agreement{waiting.length===1?'':'s'} — check back once they're done.</div>
+                )}
               </div>
-            ))}
-          </div>
+            );
+          })()}
 
           {(leases.length > 0 || mgmts.length > 0) && (
             <div style={{...card,padding:'18px 22px'}}>
@@ -1327,6 +1474,7 @@
             </div>
           )}
 
+          {celebrate && <Confetti/>}
           <footer style={{textAlign:'center',color:T.textLight,fontSize:13,marginTop:26,lineHeight:1.7}}>
             Advanced Collection Bureau, Inc. · Prepared for internal review<br/>
             Questions? {`Call or text (321) 379-6063`}

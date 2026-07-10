@@ -75,6 +75,7 @@ for (const col of [
   'review_token TEXT',
   'review_notes TEXT',
   'review_updated_at TEXT',
+  'countersigned_notified_at TEXT',
 ]) {
   try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }
@@ -87,6 +88,11 @@ for (const col of [
   "contact_email TEXT NOT NULL DEFAULT ''",
   "contact_phone TEXT NOT NULL DEFAULT ''",
   "contact_title TEXT NOT NULL DEFAULT ''",
+  'collector_signature TEXT',
+  'collector_name TEXT',
+  'collector_title TEXT',
+  'collector_signed_at TEXT',
+  'docuseal_collector_slug TEXT',
 ]) {
   try { db.exec(`ALTER TABLE entities ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }
