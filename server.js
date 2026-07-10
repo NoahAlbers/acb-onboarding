@@ -16,11 +16,43 @@ const FORMSUBMIT_ID = process.env.FORMSUBMIT_ID || 'dfeca48013a9d6519627f295dd99
 const NOTIFY_ENABLED = process.env.NOTIFY_ENABLED !== 'false';
 
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '3mb' }));
 
 const now = () => new Date().toISOString();
 const newToken = () => crypto.randomBytes(9).toString('base64url');
+
+/* ---------- rate limiting & bot hygiene ---------- */
+
+// Tiny in-memory fixed-window limiter — one process, no dependency needed.
+const rateBuckets = new Map();
+function hit(key, limit, windowMs) {
+  const t = Date.now();
+  let b = rateBuckets.get(key);
+  if (!b || t > b.resetAt) { b = { count: 0, resetAt: t + windowMs }; rateBuckets.set(key, b); }
+  b.count++;
+  return { limited: b.count > limit, retryAfter: Math.ceil((b.resetAt - t) / 1000) };
+}
+setInterval(() => {
+  const t = Date.now();
+  for (const [k, b] of rateBuckets) if (t > b.resetAt) rateBuckets.delete(k);
+}, 10 * 60 * 1000).unref();
+
+const rateLimit = (name, limit, windowMs) => (req, res, next) => {
+  const { limited, retryAfter } = hit(`${name}:${req.ip}`, limit, windowMs);
+  if (limited) {
+    res.setHeader('Retry-After', retryAfter);
+    return res.status(429).json({ error: 'Too many requests from your network — please wait a minute and try again.' });
+  }
+  next();
+};
+
+// Broad backstop for all API traffic, then tighter limits on the abusable writes.
+app.use('/api/', rateLimit('api', 600, 5 * 60 * 1000));
+
+// Keep this page for humans: no search-engine indexing anywhere.
+app.use((req, res, next) => { res.setHeader('X-Robots-Tag', 'noindex, nofollow'); next(); });
+app.get('/robots.txt', (req, res) => res.type('text/plain').send('User-agent: *\nDisallow: /\n'));
 
 const ALLOWED_UPLOAD_EXT = new Set(['.pdf', '.doc', '.docx', '.png', '.jpg', '.jpeg', '.heic', '.webp']);
 const upload = multer({
@@ -298,9 +330,13 @@ setTimeout(() => runReminderSweep().catch((e) => console.error('Reminder sweep f
 
 /* ---------- session API ---------- */
 
-app.post('/api/sessions', (req, res) => {
-  const token = newToken();
+app.post('/api/sessions', rateLimit('create', 15, 60 * 60 * 1000), (req, res) => {
   const b = req.body || {};
+  // Honeypot: a hidden "website" field humans never see. Bots fill it in.
+  if (String(b.website || '').trim()) {
+    return res.status(400).json({ error: 'Something went wrong. Please try again.' });
+  }
+  const token = newToken();
   db.prepare(
     `INSERT INTO sessions (token, company_name, contact_name, contact_email, contact_phone, mgmt_type, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -395,7 +431,7 @@ app.delete('/api/sessions/:token/entities/:id', requireSession, (req, res) => {
 
 /* ---------- signing ---------- */
 
-app.post('/api/sessions/:token/sign', requireSession, async (req, res) => {
+app.post('/api/sessions/:token/sign', rateLimit('sign', 30, 15 * 60 * 1000), requireSession, async (req, res) => {
   const { entity_ids, signer_name, signer_title, signature } = req.body || {};
   const name = String(signer_name || '').trim();
   if (!name) return res.status(400).json({ error: 'Please enter the full name of the person signing.' });
@@ -601,8 +637,19 @@ app.get('/api/sessions/:token/agreements.pdf', requireSession, async (req, res) 
 /* ---------- admin ---------- */
 
 function requireAdmin(req, res, next) {
-  const key = req.query.key || req.get('x-admin-key');
-  if (key !== ADMIN_KEY) return res.status(401).json({ error: 'Invalid admin key' });
+  const failKey = `adminfail:${req.ip}`;
+  const existing = rateBuckets.get(failKey);
+  if (existing && Date.now() < existing.resetAt && existing.count >= 10) {
+    res.setHeader('Retry-After', Math.ceil((existing.resetAt - Date.now()) / 1000));
+    return res.status(429).json({ error: 'Too many failed sign-in attempts — locked out for 15 minutes.' });
+  }
+  const given = Buffer.from(String(req.query.key || req.get('x-admin-key') || ''));
+  const wanted = Buffer.from(ADMIN_KEY);
+  const ok = given.length === wanted.length && crypto.timingSafeEqual(given, wanted);
+  if (!ok) {
+    hit(failKey, Infinity, 15 * 60 * 1000); // count the failure; threshold checked above
+    return res.status(401).json({ error: 'Invalid admin key' });
+  }
   next();
 }
 
