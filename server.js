@@ -365,10 +365,23 @@ setTimeout(() => runReminderSweep().catch((e) => console.error('Reminder sweep f
 
 /* ---------- session API ---------- */
 
-app.post('/api/sessions', rateLimit('create', 15, 60 * 60 * 1000), (req, res) => {
+// Trusted service callers (the lead dashboard) authenticate with
+// X-ACB-Service-Key and skip the per-IP rate limit and honeypot. Set
+// SERVICE_KEY in the environment to enable.
+const createSessionLimiter = rateLimit('create', 15, 60 * 60 * 1000);
+function serviceOrRateLimit(req, res, next) {
+  const key = req.get('x-acb-service-key');
+  if (process.env.SERVICE_KEY && key === process.env.SERVICE_KEY) {
+    req.isServiceCall = true;
+    return next();
+  }
+  return createSessionLimiter(req, res, next);
+}
+
+app.post('/api/sessions', serviceOrRateLimit, (req, res) => {
   const b = req.body || {};
   // Honeypot: a hidden "website" field humans never see. Bots fill it in.
-  if (String(b.website || '').trim()) {
+  if (!req.isServiceCall && String(b.website || '').trim()) {
     return res.status(400).json({ error: 'Something went wrong. Please try again.' });
   }
   const token = newToken();
@@ -379,14 +392,16 @@ app.post('/api/sessions', rateLimit('create', 15, 60 * 60 * 1000), (req, res) =>
         String(b.contact_email || '').trim(), String(b.contact_phone || '').trim(),
         String(b.mgmt_type || ''), now(), now());
   const session = getSession(token);
+  const portalUrl = `${process.env.BASE_URL || `${req.protocol}://${req.get('host')}`}/o/${token}`;
   // Fire-and-forget: the client shouldn't wait on SMTP to reach their portal.
+  // Service callers can pass suppress_welcome: true when they plan to send
+  // their own email with the portal link.
   const email = String(b.contact_email || '').trim();
-  if (email && NOTIFY_ENABLED && mailer.enabled() && getSettings().send_welcome_email) {
-    const url = `${process.env.BASE_URL || `${req.protocol}://${req.get('host')}`}/o/${token}`;
-    mailer.send({ to: email, ...emails.welcomeEmail(serializeSession(session), url) })
+  if (email && !b.suppress_welcome && NOTIFY_ENABLED && mailer.enabled() && getSettings().send_welcome_email) {
+    mailer.send({ to: email, ...emails.welcomeEmail(serializeSession(session), portalUrl) })
       .catch((e) => console.error('Welcome email failed:', e.message));
   }
-  res.json(serializeSession(session));
+  res.json({ ...serializeSession(session), portal_url: portalUrl });
 });
 
 app.get('/api/sessions/:token', requireSession, (req, res) => {
