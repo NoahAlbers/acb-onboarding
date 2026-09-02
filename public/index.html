@@ -420,9 +420,15 @@
     function WelcomeBanner({session}) {
       const first = (session.contact_name || '').trim().split(' ')[0];
       const done = !!session.completed_at;
-      if (done) return null;
+      const key = 'acb_welcome_dismissed_' + session.token;
+      const [dismissed, setDismissed] = useState(() => { try { return localStorage.getItem(key) === '1'; } catch (e) { return false; } });
+      if (done || dismissed) return null;
+      const dismiss = () => { try { localStorage.setItem(key, '1'); } catch (e) {} setDismissed(true); };
       return (
-        <div style={{...card,padding:'18px 22px',marginBottom:16,display:'flex',alignItems:'center',gap:16,background:`linear-gradient(135deg, ${T.blueLight}, #fff 70%)`}}>
+        <div style={{...card,padding:'18px 44px 18px 22px',marginBottom:16,display:'flex',alignItems:'center',gap:16,position:'relative',background:`linear-gradient(135deg, ${T.blueLight}, #fff 70%)`}}>
+          <button type="button" onClick={dismiss} aria-label="Dismiss" title="Dismiss"
+            style={{position:'absolute',top:10,right:10,width:28,height:28,borderRadius:8,border:'none',background:'transparent',color:T.textLight,fontSize:18,lineHeight:1,cursor:'pointer'}}
+            onMouseEnter={e=>{e.currentTarget.style.background=T.blueMid;}} onMouseLeave={e=>{e.currentTarget.style.background='transparent';}}>×</button>
           {session.logo_url && <ClientLogo url={session.logo_url} name={session.company_name} size={56}/>}
           <div style={{minWidth:0}}>
             <div style={{fontWeight:800,color:T.text,fontSize:17,letterSpacing:-0.2}}>

@@ -874,6 +874,8 @@ app.get('/api/admin/stats', requireAdmin, (req, res) => {
 });
 
 function deleteSessionRow(session) {
+  // Tell the lead console first so it can drop this portal's tracking.
+  notifyLeadConsole('onboarding_deleted', session);
   const files = db.prepare('SELECT stored_name FROM files WHERE session_id = ?').all(session.id);
   db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id); // entities/files cascade
   for (const f of files) fs.promises.unlink(path.join(UPLOAD_DIR, f.stored_name)).catch(() => {});
