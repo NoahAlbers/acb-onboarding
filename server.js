@@ -8,6 +8,7 @@ const { buildAgreementPdf, buildAllAgreementsPdf, resolvePayment } = require('./
 const docuseal = require('./lib/docuseal');
 const mailer = require('./lib/mailer');
 const emails = require('./lib/emails');
+const { notifyLeadConsole } = require('./lib/lead-console');
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || '!GreatCollectors123?';
@@ -275,6 +276,7 @@ async function maybeNotifyCompleted(session) {
   if (!allSigned) return;
   if (!fresh.completed_at) {
     db.prepare('UPDATE sessions SET completed_at = ?, updated_at = ? WHERE id = ?').run(now(), now(), fresh.id);
+    notifyLeadConsole('onboarding_complete', fresh, { detail: `${entities.length} agreement${entities.length === 1 ? '' : 's'} signed`, portal_url: portalUrlFor(fresh) });
   }
   if (fresh.notified_at || !NOTIFY_ENABLED) return;
   db.prepare('UPDATE sessions SET notified_at = ? WHERE id = ?').run(now(), fresh.id);
@@ -386,11 +388,11 @@ app.post('/api/sessions', serviceOrRateLimit, (req, res) => {
   }
   const token = newToken();
   db.prepare(
-    `INSERT INTO sessions (token, company_name, contact_name, contact_email, contact_phone, mgmt_type, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sessions (token, company_name, contact_name, contact_email, contact_phone, mgmt_type, lead_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(token, String(b.company_name || '').trim(), String(b.contact_name || '').trim(),
         String(b.contact_email || '').trim(), String(b.contact_phone || '').trim(),
-        String(b.mgmt_type || ''), now(), now());
+        String(b.mgmt_type || ''), req.isServiceCall && b.lead_id ? String(b.lead_id) : null, now(), now());
   const session = getSession(token);
   const portalUrl = `${process.env.BASE_URL || `${req.protocol}://${req.get('host')}`}/o/${token}`;
   // Fire-and-forget: the client shouldn't wait on SMTP to reach their portal.
@@ -405,6 +407,10 @@ app.post('/api/sessions', serviceOrRateLimit, (req, res) => {
 });
 
 app.get('/api/sessions/:token', requireSession, (req, res) => {
+  if (!req.session.console_opened_at) {
+    db.prepare('UPDATE sessions SET console_opened_at = ? WHERE id = ?').run(now(), req.session.id);
+    notifyLeadConsole('portal_opened', req.session, { portal_url: portalUrlFor(req.session) });
+  }
   res.json(serializeSession(req.session));
 });
 
@@ -420,6 +426,10 @@ app.patch('/api/sessions/:token', requireSession, (req, res) => {
   if (updates.length) {
     values.push(now(), req.session.id);
     db.prepare(`UPDATE sessions SET ${updates.join(', ')}, updated_at = ? WHERE id = ?`).run(...values);
+  }
+  if ('mgmt_type' in req.body && String(req.body.mgmt_type || '') && String(req.body.mgmt_type) !== String(req.session.mgmt_type || '')) {
+    const label = String(req.body.mgmt_type) === 'third_party' ? 'Third-party management' : 'Owner operator';
+    notifyLeadConsole('mgmt_type_chosen', getSession(req.params.token), { detail: label });
   }
   res.json(serializeSession(getSession(req.params.token)));
 });
@@ -441,6 +451,10 @@ app.post('/api/sessions/:token/entities', requireSession, (req, res) => {
     added.push(info.lastInsertRowid);
   }
   touch(req.session.id);
+  if (added.length) {
+    const total = db.prepare("SELECT COUNT(*) AS n FROM entities WHERE session_id = ? AND legal_name != ''").get(req.session.id).n;
+    notifyLeadConsole('entity_added', getSession(req.params.token), { detail: `${added.length} added, ${total} total` });
+  }
   res.json(serializeSession(getSession(req.params.token)));
 });
 
@@ -501,6 +515,7 @@ app.post('/api/sessions/:token/sign', rateLimit('sign', 30, 15 * 60 * 1000), req
     signed += update.run(name, String(signer_title || '').trim(), signature, stamp, ip, id, req.session.id).changes;
   }
   touch(req.session.id);
+  if (signed > 0) notifyLeadConsole('agreement_signed', getSession(req.params.token), { detail: `${signed} agreement${signed === 1 ? '' : 's'} signed by ${name}` });
   await notifySignatures(req.session, ids);
   await maybeNotifyCompleted(req.session);
   res.json({ signed, ...serializeSession(getSession(req.params.token)) });
@@ -511,10 +526,14 @@ app.post('/api/sessions/:token/sign', rateLimit('sign', 30, 15 * 60 * 1000), req
 const baseUrl = (req) => process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
 
 function markEntitySigned(sessionId, entityId, status) {
-  db.prepare(
+  const changed = db.prepare(
     `UPDATE entities SET signed_at = ?, signer_name = COALESCE(?, signer_name), signed_doc_url = ?
      WHERE id = ? AND session_id = ? AND signed_at IS NULL`
-  ).run(status.completed_at || now(), status.signer_name, status.document_url, entityId, sessionId);
+  ).run(status.completed_at || now(), status.signer_name, status.document_url, entityId, sessionId).changes;
+  if (changed) {
+    const sess = db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId);
+    notifyLeadConsole('agreement_signed', sess, { detail: status.signer_name ? `Signed via DocuSeal by ${status.signer_name}` : 'Signed via DocuSeal' });
+  }
 }
 
 // Pull latest status from DocuSeal for every entity with an in-flight submission.

@@ -76,6 +76,8 @@ for (const col of [
   'review_notes TEXT',
   'review_updated_at TEXT',
   'countersigned_notified_at TEXT',
+  'lead_id TEXT',
+  'console_opened_at TEXT',
 ]) {
   try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }
