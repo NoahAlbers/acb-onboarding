@@ -78,6 +78,7 @@ for (const col of [
   'countersigned_notified_at TEXT',
   'lead_id TEXT',
   'console_opened_at TEXT',
+  'logo_url TEXT',
 ]) {
   try { db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch (e) { /* already exists */ }
 }

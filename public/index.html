@@ -197,7 +197,7 @@
 
     const Brand = () => (
       <div style={{display:'flex',alignItems:'center',justifyContent:'center',gap:10}}>
-        <div style={{width:34,height:34,borderRadius:10,background:T.blue,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:15}}>ACB</div>
+        <img src="/acb-mark.svg" alt="" style={{width:38,height:38,display:'block'}}/>
         <div style={{fontWeight:700,color:T.text,fontSize:16}}>Advanced Collection Bureau</div>
       </div>
     );
@@ -324,6 +324,7 @@
           </div>
           <div className="layout" style={{maxWidth:1120,margin:'0 auto',padding:'22px 18px 90px',display:'flex',gap:22,alignItems:'flex-start'}}>
             <div style={{flex:'1 1 620px',minWidth:0}}>
+              <WelcomeBanner session={session}/>
               <CompanySection session={session} patchSession={patchSession} attention={attention[0]}/>
               <EntitiesSection session={session} addEntities={addEntities} patchEntity={patchEntity} removeEntity={removeEntity} showToast={showToast}
                                draft={entityDraft} setDraft={setEntityDraft} attention={attention[1]}/>
@@ -331,6 +332,7 @@
               <DocumentsSection session={session} token={token} setSession={setSession} showToast={showToast} attention={attention[3]}/>
               <SignSection session={session} token={token} setSession={setSession} showToast={showToast} draftDirty={draftDirty}/>
               <footer style={{textAlign:'center',color:T.textLight,fontSize:13,marginTop:30,lineHeight:1.7}}>
+                <img src="/acb-mark.svg" alt="" style={{width:30,height:30,opacity:.55,display:'block',margin:'0 auto 6px'}}/>
                 Advanced Collection Bureau, Inc. · Phone (321) 633-4999 · Toll Free (877) 928-9289<br/>
                 Advancedcb.com · PO Box 560063 Rockledge, FL 32956
               </footer>
@@ -389,7 +391,8 @@
       return (
         <div style={{position:'sticky',top:0,zIndex:60,background:'#fff',borderBottom:`1px solid ${T.border}`,boxShadow:'0 1px 8px rgba(26,26,46,.05)'}}>
           <div className="topbar-inner" style={{maxWidth:1120,margin:'0 auto',padding:'9px 18px',display:'flex',alignItems:'center',gap:12}}>
-            <div style={{width:32,height:32,borderRadius:9,background:T.blue,color:'#fff',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:800,fontSize:13,flexShrink:0}}>ACB</div>
+            <img src="/acb-mark.svg" alt="Advanced Collection Bureau" style={{width:34,height:34,flexShrink:0,display:'block'}}/>
+            {session.logo_url && <ClientLogo url={session.logo_url} name={session.company_name} size={30}/>}
             <div style={{minWidth:0,flex:1}}>
               <div className="topbar-title" style={{fontWeight:800,color:T.text,fontSize:15.5,letterSpacing:-0.2,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
                 Client Onboarding{session.company_name ? ` — ${session.company_name}` : ''}
@@ -405,13 +408,40 @@
       );
     }
 
+    // The client's own logo, pulled from their website by the lead console.
+    // Hidden if the image fails to load so a broken icon never shows.
+    function ClientLogo({url, name, size=30}) {
+      const [ok, setOk] = useState(true);
+      if (!ok) return null;
+      return <img src={url} alt={name || ''} onError={()=>setOk(false)}
+        style={{width:size,height:size,borderRadius:8,objectFit:'contain',background:'#fff',border:`1px solid ${T.border}`,padding:2,flexShrink:0,display:'block'}}/>;
+    }
+
+    function WelcomeBanner({session}) {
+      const first = (session.contact_name || '').trim().split(' ')[0];
+      const done = !!session.completed_at;
+      if (done) return null;
+      return (
+        <div style={{...card,padding:'18px 22px',marginBottom:16,display:'flex',alignItems:'center',gap:16,background:`linear-gradient(135deg, ${T.blueLight}, #fff 70%)`}}>
+          {session.logo_url && <ClientLogo url={session.logo_url} name={session.company_name} size={56}/>}
+          <div style={{minWidth:0}}>
+            <div style={{fontWeight:800,color:T.text,fontSize:17,letterSpacing:-0.2}}>
+              {first ? `Welcome, ${first}.` : 'Welcome.'}{session.company_name ? ` We set this up for ${session.company_name}.` : ''}
+            </div>
+            <div style={{fontSize:13.5,color:T.textMid,lineHeight:1.55,marginTop:4}}>
+              Work through the steps below at your own pace. Everything saves as you go, and your account rep at Advanced Collection Bureau is a call away at (321) 633-4999.
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     function ShareCard({session, showToast}) {
       return (
         <div style={{...card,padding:'18px 20px',marginBottom:14}}>
           <b style={{fontSize:14.5,color:T.text,display:'block',marginBottom:6}}>Share with your team</b>
           <div style={{fontSize:13,color:T.textMid,lineHeight:1.55,marginBottom:12}}>
-            <b style={{color:T.blue}}>Everything saves automatically.</b> Anyone with this page's link can pick up where you left off —
-            accounting fills in check details, your office manager uploads documents, an authorized signer signs. No logins needed.
+            <b style={{color:T.blue}}>Everything saves automatically.</b> Anyone with this page's link can pick up where you left off, no logins needed.
           </div>
           <button style={{...btnGhost,width:'100%'}} onClick={()=>copyPortalLink(showToast)}>🔗 Copy link</button>
         </div>
