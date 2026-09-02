@@ -643,6 +643,7 @@ app.post('/api/sessions/:token/files', requireSession, (req, res) => {
       'INSERT INTO files (session_id, kind, original_name, stored_name, size, mime, uploaded_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(req.session.id, kind, req.file.originalname, req.file.filename, req.file.size, req.file.mimetype, now());
     touch(req.session.id);
+    notifyLeadConsole('document_uploaded', getSession(req.params.token), { detail: kind.replace(/_/g, ' ') });
     res.json(serializeSession(getSession(req.params.token)));
   });
 });
