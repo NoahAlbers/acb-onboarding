@@ -123,6 +123,7 @@ function serializeSession(session, opts = {}) {
     token: session.token,
     signing_mode: docuseal.enabled() ? 'docuseal' : 'builtin',
     company_name: session.company_name,
+    logo_url: session.logo_url || null,
     contact_name: session.contact_name,
     contact_email: session.contact_email,
     contact_phone: session.contact_phone,
@@ -388,11 +389,14 @@ app.post('/api/sessions', serviceOrRateLimit, (req, res) => {
   }
   const token = newToken();
   db.prepare(
-    `INSERT INTO sessions (token, company_name, contact_name, contact_email, contact_phone, mgmt_type, lead_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sessions (token, company_name, contact_name, contact_email, contact_phone, mgmt_type, lead_id, logo_url, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(token, String(b.company_name || '').trim(), String(b.contact_name || '').trim(),
         String(b.contact_email || '').trim(), String(b.contact_phone || '').trim(),
-        String(b.mgmt_type || ''), req.isServiceCall && b.lead_id ? String(b.lead_id) : null, now(), now());
+        String(b.mgmt_type || ''), req.isServiceCall && b.lead_id ? String(b.lead_id) : null,
+        // Only the lead console may set a logo, and only an https image URL.
+        req.isServiceCall && /^https:\/\/\S+$/.test(String(b.logo_url || '')) ? String(b.logo_url).slice(0, 500) : null,
+        now(), now());
   const session = getSession(token);
   const portalUrl = `${process.env.BASE_URL || `${req.protocol}://${req.get('host')}`}/o/${token}`;
   // Fire-and-forget: the client shouldn't wait on SMTP to reach their portal.
