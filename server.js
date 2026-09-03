@@ -14,6 +14,11 @@ const ADMIN_KEY = process.env.ADMIN_KEY || '!GreatCollectors123?';
 // FormSubmit endpoint used by the existing acb-form intake page; override via env.
 const FORMSUBMIT_ID = process.env.FORMSUBMIT_ID || 'dfeca48013a9d6519627f295dd99503c';
 const NOTIFY_ENABLED = process.env.NOTIFY_ENABLED !== 'false';
+// Lead Console (advancedcb.app) integration: SERVICE_KEY authenticates inbound
+// service calls; the webhook settings push onboarding milestones back to it.
+const SERVICE_KEY = process.env.SERVICE_KEY || '';
+const LEAD_WEBHOOK_URL = process.env.LEAD_CONSOLE_WEBHOOK_URL || '';
+const LEAD_WEBHOOK_KEY = process.env.LEAD_CONSOLE_WEBHOOK_KEY || '';
 
 const app = express();
 app.set('trust proxy', 1);
@@ -275,6 +280,7 @@ async function maybeNotifyCompleted(session) {
   if (!allSigned) return;
   if (!fresh.completed_at) {
     db.prepare('UPDATE sessions SET completed_at = ?, updated_at = ? WHERE id = ?').run(now(), now(), fresh.id);
+    postLeadConsole('onboarding.completed', getSession(session.token));
   }
   if (fresh.notified_at || !NOTIFY_ENABLED) return;
   db.prepare('UPDATE sessions SET notified_at = ? WHERE id = ?').run(now(), fresh.id);
@@ -363,14 +369,46 @@ async function runReminderSweep() {
 setInterval(() => runReminderSweep().catch((e) => console.error('Reminder sweep failed:', e.message)), 60 * 60 * 1000);
 setTimeout(() => runReminderSweep().catch((e) => console.error('Reminder sweep failed:', e.message)), 30 * 1000);
 
-/* ---------- session API ---------- */
+// Fire-and-forget milestone webhook to the Lead Console.
+// Events: onboarding.created | onboarding.completed | onboarding.countersigned
+function postLeadConsole(event, sessionRow) {
+  if (!LEAD_WEBHOOK_URL) return;
+  const data = serializeSession(sessionRow);
+  const payload = {
+    event,
+    sent_at: now(),
+    onboarding: {
+      token: data.token,
+      url: portalUrlFor(sessionRow),
+      company_name: data.company_name,
+      contact_name: data.contact_name,
+      contact_email: data.contact_email,
+      contact_phone: data.contact_phone,
+      mgmt_type: data.mgmt_type,
+      entities: data.entities.map((e) => ({
+        legal_name: e.legal_name, property_name: e.property_name,
+        signed_at: e.signed_at, collector_signed_at: e.collector_signed_at,
+      })),
+      progress: data.progress,
+      created_at: data.created_at,
+      completed_at: data.completed_at,
+    },
+  };
+  fetch(LEAD_WEBHOOK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Webhook-Key': LEAD_WEBHOOK_KEY,
+      Authorization: `Bearer ${LEAD_WEBHOOK_KEY}`,
+    },
+    body: JSON.stringify(payload),
+  }).then((r) => {
+    if (!r.ok) console.error(`Lead Console webhook ${event} rejected: HTTP ${r.status}`);
+  }).catch((e) => console.error(`Lead Console webhook ${event} failed:`, e.message));
+}
 
-app.post('/api/sessions', rateLimit('create', 15, 60 * 60 * 1000), (req, res) => {
-  const b = req.body || {};
-  // Honeypot: a hidden "website" field humans never see. Bots fill it in.
-  if (String(b.website || '').trim()) {
-    return res.status(400).json({ error: 'Something went wrong. Please try again.' });
-  }
+// Shared by the public landing form and the authenticated service API.
+function createOnboarding(b, publicBase) {
   const token = newToken();
   db.prepare(
     `INSERT INTO sessions (token, company_name, contact_name, contact_email, contact_phone, mgmt_type, created_at, updated_at)
@@ -379,14 +417,42 @@ app.post('/api/sessions', rateLimit('create', 15, 60 * 60 * 1000), (req, res) =>
         String(b.contact_email || '').trim(), String(b.contact_phone || '').trim(),
         String(b.mgmt_type || ''), now(), now());
   const session = getSession(token);
-  // Fire-and-forget: the client shouldn't wait on SMTP to reach their portal.
   const email = String(b.contact_email || '').trim();
   if (email && NOTIFY_ENABLED && mailer.enabled() && getSettings().send_welcome_email) {
-    const url = `${process.env.BASE_URL || `${req.protocol}://${req.get('host')}`}/o/${token}`;
+    const url = `${publicBase}/o/${token}`;
     mailer.send({ to: email, ...emails.welcomeEmail(serializeSession(session), url) })
       .catch((e) => console.error('Welcome email failed:', e.message));
   }
+  postLeadConsole('onboarding.created', session);
+  return session;
+}
+
+/* ---------- session API ---------- */
+
+app.post('/api/sessions', rateLimit('create', 15, 60 * 60 * 1000), (req, res) => {
+  const b = req.body || {};
+  // Honeypot: a hidden "website" field humans never see. Bots fill it in.
+  if (String(b.website || '').trim()) {
+    return res.status(400).json({ error: 'Something went wrong. Please try again.' });
+  }
+  const session = createOnboarding(b, process.env.BASE_URL || `${req.protocol}://${req.get('host')}`);
   res.json(serializeSession(session));
+});
+
+// Lead Console -> onboarding: create a pre-filled onboarding for a won lead.
+// Auth: X-Service-Key header (or Authorization: Bearer) matching SERVICE_KEY.
+app.post('/api/service/onboardings', rateLimit('service', 120, 60 * 60 * 1000), (req, res) => {
+  if (!SERVICE_KEY) return res.status(503).json({ error: 'SERVICE_KEY is not configured on this server.' });
+  const given = Buffer.from(String(req.get('x-service-key') || (req.get('authorization') || '').replace(/^Bearer\s+/i, '')));
+  const wanted = Buffer.from(SERVICE_KEY);
+  if (given.length !== wanted.length || !crypto.timingSafeEqual(given, wanted)) {
+    return res.status(401).json({ error: 'Invalid service key' });
+  }
+  const b = req.body || {};
+  if (!String(b.company_name || '').trim()) return res.status(400).json({ error: 'company_name is required' });
+  const base = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+  const session = createOnboarding(b, base);
+  res.json({ token: session.token, url: `${base}/o/${session.token}`, welcome_email_sent: !!(String(b.contact_email || '').trim() && mailer.enabled() && getSettings().send_welcome_email) });
 });
 
 app.get('/api/sessions/:token', requireSession, (req, res) => {
@@ -701,8 +767,10 @@ async function maybeNotifyCountersigned(session) {
   const fresh = getSession(session.token);
   const entities = db.prepare("SELECT * FROM entities WHERE session_id = ? AND legal_name != ''").all(fresh.id);
   const done = entities.length > 0 && entities.every((e) => e.signed_at && e.collector_signed_at);
-  if (!done || fresh.countersigned_notified_at || !NOTIFY_ENABLED) return;
+  if (!done || fresh.countersigned_notified_at) return;
   db.prepare('UPDATE sessions SET countersigned_notified_at = ? WHERE id = ?').run(now(), fresh.id);
+  postLeadConsole('onboarding.countersigned', getSession(session.token));
+  if (!NOTIFY_ENABLED) return;
   const settings = getSettings();
   if (!mailer.enabled() || !settings.notify_emails.trim()) return;
   try {

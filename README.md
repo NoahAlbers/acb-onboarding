@@ -93,6 +93,9 @@ npm start          # http://localhost:3000
 | `MAIL_DEBUG` | — | `true` (with no SMTP_HOST) logs emails instead of sending — for local testing |
 | `FORMSUBMIT_ID` | (acb-form's ID) | FormSubmit fallback for completion notices when SMTP isn't configured |
 | `NOTIFY_ENABLED` | `true` | Set `false` to disable all outbound notifications |
+| `SERVICE_KEY` | — | Shared secret that lets the Lead Console create pre-filled onboardings |
+| `LEAD_CONSOLE_WEBHOOK_URL` | — | Where onboarding milestones are POSTed |
+| `LEAD_CONSOLE_WEBHOOK_KEY` | — | Secret sent with those webhooks |
 
 ## Email management
 
@@ -114,6 +117,37 @@ Emails require SMTP (see env vars above) — any provider works: Google Workspac
 (app password), Microsoft 365, or a transactional service like Resend/Postmark/SES
 (their SMTP endpoints). Without SMTP, completion notices fall back to FormSubmit and
 reminders stay off. Use the **Send test email** button in /admin to verify the setup.
+
+## Lead Console integration (advancedcb.app)
+
+**Inbound — create an onboarding from a won lead:**
+
+```
+POST /api/service/onboardings
+X-Service-Key: <SERVICE_KEY>          (or Authorization: Bearer <SERVICE_KEY>)
+{ "company_name": "...", "contact_name": "...", "contact_email": "...",
+  "contact_phone": "...", "mgmt_type": "third_party" | "owner_operator" }
+
+-> { "token": "...", "url": "https://onboarding.advancedcb.com/o/...", "welcome_email_sent": true }
+```
+
+Only `company_name` is required. The client gets the same welcome email as a self-serve
+signup (unless that's switched off in admin), so the Lead Console can hand a lead straight
+to onboarding without anyone copying details by hand.
+
+**Outbound — milestone webhooks** POSTed to `LEAD_CONSOLE_WEBHOOK_URL` with
+`X-Webhook-Key` and `Authorization: Bearer` headers set to `LEAD_CONSOLE_WEBHOOK_KEY`:
+
+| Event | Fires when |
+|---|---|
+| `onboarding.created` | An onboarding starts (self-serve or via the service API) |
+| `onboarding.completed` | The client has signed every agreement |
+| `onboarding.countersigned` | The owner has countersigned — fully executed |
+
+Each event fires exactly once per onboarding. The payload carries the token, portal URL,
+company/contact fields, per-entity signing status, and progress counts. Webhooks are
+fire-and-forget: a slow or unreachable Lead Console is logged and never blocks or fails
+a client action.
 
 ## Pages
 
